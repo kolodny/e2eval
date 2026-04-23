@@ -1,4 +1,4 @@
-#!/usr/bin/env -S tsx
+#!/usr/bin/env node
 /**
  * MCP wrapper server — agent-agnostic.
  *

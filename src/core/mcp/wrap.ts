@@ -13,22 +13,20 @@ import type { McpServerDef } from '../types.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const HERE = path.dirname(__filename);
-const SERVER = path.join(HERE, 'server.ts');
-
-// Absolute tsx binary. The wrapper server's shebang (`tsx`) works too, but
-// pinning avoids any ambiguity about which tsx the agent's CWD would resolve.
-const TSX = path.join(HERE, '..', '..', 'node_modules', '.bin', 'tsx');
+// Resolves to the compiled wrapper server in dist/ at runtime (next to this
+// file). Plain node — no tsx dependency in the consumer's install tree.
+const SERVER = path.join(HERE, 'server.js');
 
 function wrap(name: string, server: McpServerDef): McpServerDef {
   if (server.url) {
     return {
-      command: TSX,
+      command: 'node',
       args: [SERVER, '--type=http', `--name=${name}`, server.url],
     };
   }
   if (server.command) {
     return {
-      command: TSX,
+      command: 'node',
       args: [
         SERVER,
         '--type=stdio',
