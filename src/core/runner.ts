@@ -86,8 +86,9 @@ async function runEval(ev: Eval, opts: RunOptions): Promise<RunResult> {
   const transcriptPath = `${opts.out}.${adapter.name}.jsonl`;
   const toolLogPath = `${opts.out}.${adapter.name}.tool-log.jsonl`;
   const graderPath = `${opts.out}.${adapter.name}.grader.json`;
+  const stderrPath = `${opts.out}.${adapter.name}.stderr.log`;
 
-  for (const p of [transcriptPath, toolLogPath, graderPath]) {
+  for (const p of [transcriptPath, toolLogPath, graderPath, stderrPath]) {
     await fs.remove(p);
   }
 
@@ -100,11 +101,7 @@ async function runEval(ev: Eval, opts: RunOptions): Promise<RunResult> {
 
   await fs.ensureDir(runDir);
   try {
-    // Merge infrastructure paths into config so middleware can block reads.
-    // The eval's own forbiddenPaths (if any) are preserved.
     const evalConfig: Record<string, unknown> = { ...(ev.config ?? {}) };
-    const infraPaths = [runDir, opts.out, toolLogPath, graderPath, '.eval_runs'];
-    evalConfig.forbiddenPaths = [...infraPaths, ...((evalConfig.forbiddenPaths as string[]) ?? [])];
 
     const configPath = path.join(runDir, 'eval-config.json');
     await fs.writeJson(configPath, evalConfig, { spaces: 2 });
@@ -145,7 +142,7 @@ async function runEval(ev: Eval, opts: RunOptions): Promise<RunResult> {
       ? `http://127.0.0.1:${opts.middlewareServer.port}`
       : '';
 
-    const runResult = await adapter.run({
+    await adapter.run({
       prompt,
       mcpConfigPath,
       runDir,
@@ -158,14 +155,13 @@ async function runEval(ev: Eval, opts: RunOptions): Promise<RunResult> {
         EVAL_PLUGIN_SERVER: middlewareServerUrl,
       },
       transcriptPath,
+      stderrPath,
       signal: ac.signal,
     });
 
-    const runIdCheck = checkToolLogRunId(toolLogPath, runId, adapter.name);
+    const runIdCheck = checkToolLogRunId(toolLogPath, runId);
 
-    // stderrTail is available on graderOutput for callers to inspect
-
-    const native = adapter.parseTranscript(transcriptPath, { mcpServerNames: [] });
+    const native = adapter.parseTranscript(transcriptPath);
     const mcpCalls = readMcpToolLog(toolLogPath);
     const toolCalls = [...mcpCalls, ...native.nativeToolCalls];
 
@@ -182,6 +178,7 @@ async function runEval(ev: Eval, opts: RunOptions): Promise<RunResult> {
       config: evalConfig as any,
       middleware: opts.middleware ?? [],
       callLLM,
+      stderrPath,
       abort,
     });
 
@@ -215,6 +212,7 @@ async function grade(opts: {
   config: Readonly<Config>;
   middleware: readonly Middleware[];
   callLLM: CallLLM;
+  stderrPath: string;
   abort: (reason?: string) => void;
 }): Promise<GraderOutput> {
   const { question, finalAnswer, toolCalls } = opts;
@@ -233,6 +231,7 @@ async function grade(opts: {
         config: opts.config,
         scores,
         callLLM: opts.callLLM,
+        stderrPath: opts.stderrPath,
         abort: opts.abort,
       });
       if (result?.data !== undefined) middlewareOutputs[mw.name] = result.data;
@@ -251,7 +250,7 @@ async function grade(opts: {
 
 // ────────────────────────────────────────────────────────────── Integrity checks
 
-function checkToolLogRunId(logPath: string, expected: string, agent: string) {
+function checkToolLogRunId(logPath: string, expected: string) {
   if (!existsSync(logPath)) return { total: 0, mismatch: 0, missing: 0 };
   const src = readFileSync(logPath, 'utf8');
   if (!src) return { total: 0, mismatch: 0, missing: 0 };

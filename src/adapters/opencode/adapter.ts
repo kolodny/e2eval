@@ -20,9 +20,10 @@
  */
 import { $, fs } from 'zx';
 import { spawnSync } from 'node:child_process';
+import { openSync, closeSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import type { AgentAdapter, AgentRunResult, McpServerDef } from '../../core/types.js';
+import type { AgentAdapter, McpServerDef } from '../../core/types.js';
 import { discoverOpencodeMcpStack } from './discover-mcp.js';
 import { parseOpencodeTranscript } from './parse-transcript.js';
 
@@ -42,7 +43,7 @@ const adapter: AgentAdapter = {
     return discoverOpencodeMcpStack(cwd);
   },
 
-  async run(opts): Promise<AgentRunResult> {
+  async run(opts): Promise<void> {
     // Write ONLY the wrapped set to runDir/opencode.jsonc. We don't merge in
     // pwd-discovered MCPs because opencode spawns every entry at startup —
     // bundling the user's ambient stack (newt-exec, playwright, etc.) can
@@ -77,21 +78,21 @@ const adapter: AgentAdapter = {
     // `stdio: ['ignore', 'pipe', 'pipe']`: opencode blocks reading stdin
     // when a writable pipe is inherited (zx's default). Close the handle
     // so opencode sees EOF immediately and proceeds.
-    const proc = $({
-      cwd: opts.runDir,
-      env: opts.env,
-      timeout: '30m',
-      nothrow: true,
-      stdio: ['ignore', 'pipe', 'pipe'],
-      ...(opts.signal ? { signal: opts.signal } : {}),
-    })`opencode run --format json --dangerously-skip-permissions --model ${DEFAULT_MODEL} ${opts.prompt}`;
-    const result = await proc;
-    await fs.writeFile(opts.transcriptPath, result.stdout ?? '');
-
-    return {
-      exitCode: result.exitCode ?? 1,
-      stderrTail: (result.stderr ?? '').slice(-2000),
-    };
+    const stderrFd = openSync(opts.stderrPath, 'w');
+    try {
+      const proc = $({
+        cwd: opts.runDir,
+        env: opts.env,
+        timeout: '30m',
+        nothrow: true,
+        stdio: ['ignore', 'pipe', stderrFd],
+        ...(opts.signal ? { signal: opts.signal } : {}),
+      })`opencode run --format json --dangerously-skip-permissions --model ${DEFAULT_MODEL} ${opts.prompt}`;
+      const result = await proc;
+      await fs.writeFile(opts.transcriptPath, result.stdout ?? '');
+    } finally {
+      closeSync(stderrFd);
+    }
   },
 
   parseTranscript(path) {

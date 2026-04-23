@@ -13,8 +13,9 @@
  */
 import { $, fs } from 'zx';
 import { spawnSync } from 'node:child_process';
+import { openSync, closeSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import type { AgentAdapter, AgentRunResult } from '../../core/types.js';
+import type { AgentAdapter } from '../../core/types.js';
 import { discoverClaudeMcpStack } from './discover-mcp.js';
 import { parseClaudeTranscript } from './parse-transcript.js';
 
@@ -32,7 +33,7 @@ const adapter: AgentAdapter = {
     return discoverClaudeMcpStack(cwd);
   },
 
-  async run(opts): Promise<AgentRunResult> {
+  async run(opts): Promise<void> {
     // Deliberately NO `--strict-mcp-config`: we want claude's normal
     // discovery chain (user-level + pwd `.mcp.json` walk-up) to layer on
     // top of our wrapped config. That way an eval inherits any MCP server
@@ -42,13 +43,10 @@ const adapter: AgentAdapter = {
       ? [`--mcp-config=${opts.mcpConfigPath}`]
       : [];
 
-    // `--settings <json-literal>` registers:
-    //   - PreToolUse:  block reads against EVAL_FORBIDDEN_PATHS (the eval
-    //                  source, so the agent can't just `cat` the answer).
-    //   - PostToolUse: log every tool call (Bash/Read/Task/MCP/native) to
-    //                  EVAL_TOOL_LOG. The logger no longer filters MCP —
-    //                  with the wrapper + plugin both firing we tolerate the
-    //                  duplication in exchange for uniform coverage.
+    // `--settings <json-literal>` registers PreToolUse + PostToolUse hooks
+    // that pipe every native tool call through the middleware server.
+    // `onToolCall` middleware can block by returning a CallToolResult (the
+    // hook exits 2); `afterToolCall` observes.
     const settings = JSON.stringify({
       hooks: {
         PreToolUse: [
@@ -70,21 +68,24 @@ const adapter: AgentAdapter = {
       },
     });
 
-    const proc = $({
-      cwd: opts.runDir,
-      env: opts.env,
-      timeout: '30m',
-      nothrow: true,
-      stdio: ['ignore', 'pipe', 'pipe'],
-      ...(opts.signal ? { signal: opts.signal } : {}),
-    })`claude ${mcpArgs} --settings ${settings} --permission-mode=bypassPermissions --output-format=stream-json --verbose -p ${opts.prompt}`;
-    const result = await proc;
-    await fs.writeFile(opts.transcriptPath, result.stdout ?? '');
-
-    return {
-      exitCode: result.exitCode ?? 1,
-      stderrTail: (result.stderr ?? '').slice(-2000),
-    };
+    // OS-level redirect stderr → stderrPath. Skips zx's buffer (no
+    // maxBuffer risk on chatty runs) and is streamable from disk during
+    // the run for debugging.
+    const stderrFd = openSync(opts.stderrPath, 'w');
+    try {
+      const proc = $({
+        cwd: opts.runDir,
+        env: opts.env,
+        timeout: '30m',
+        nothrow: true,
+        stdio: ['ignore', 'pipe', stderrFd],
+        ...(opts.signal ? { signal: opts.signal } : {}),
+      })`claude ${mcpArgs} --settings ${settings} --permission-mode=bypassPermissions --output-format=stream-json --verbose -p ${opts.prompt}`;
+      const result = await proc;
+      await fs.writeFile(opts.transcriptPath, result.stdout ?? '');
+    } finally {
+      closeSync(stderrFd);
+    }
   },
 
   parseTranscript(path) {

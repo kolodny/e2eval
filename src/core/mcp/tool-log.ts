@@ -4,11 +4,10 @@
  * The log has three kinds of entries:
  *   - `request` — what the agent asked for (tool name + input)
  *   - `result`  — what we returned (post-middleware-chain content, isError flag)
- *   - `audit`   — middleware-originated structured notes
+ *   - `audit`   — diagnostic notes (e.g. the list_tools output-schema strip)
  *
  * We correlate request + result by `callId` (synthetic monotonic per server
- * assigned in `server.ts`). Audit entries are ignored here; the runner
- * surfaces them separately via the audit file.
+ * assigned in `server.ts`). Audit entries are ignored.
  *
  * A request without a matching result means the agent triggered a call that
  * was aborted (e.g. short-circuited exception) — we emit those too, with

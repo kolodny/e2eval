@@ -106,6 +106,8 @@ export type AfterEvalContext = MiddlewareContext & {
   toolCalls: ToolCall[];
   scores: Array<Score & { middleware: string }>;
   callLLM: CallLLM;
+  /** Full stderr of the agent process. Read lazily — `readFileSync(ctx.stderrPath, 'utf8')`. */
+  stderrPath: string;
 };
 
 export type AfterEvalResult = {
@@ -191,20 +193,17 @@ export type AgentRunOpts = {
   runDir: string;
   env: Record<string, string>;
   transcriptPath: string;
+  /** Adapter writes the agent process's stderr here (OS-level redirect). */
+  stderrPath: string;
   signal?: AbortSignal;
-};
-
-export type AgentRunResult = {
-  exitCode: number;
-  stderrTail: string;
 };
 
 export interface AgentAdapter {
   readonly name: string;
   readonly supportsMcp: boolean;
   discoverMcpStack(cwd: string): { mcpServers: Record<string, McpServerDef>; env?: Record<string, string> };
-  run(opts: AgentRunOpts): Promise<AgentRunResult>;
-  parseTranscript(path: string, opts?: { mcpServerNames?: string[] }): NormalizedTranscript;
+  run(opts: AgentRunOpts): Promise<void>;
+  parseTranscript(path: string): NormalizedTranscript;
   callLLM: CallLLM;
 }
 

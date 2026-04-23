@@ -23,10 +23,11 @@
  */
 import { $, fs } from 'zx';
 import { spawnSync } from 'node:child_process';
+import { openSync, closeSync } from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import { fileURLToPath } from 'node:url';
-import type { AgentAdapter, AgentRunResult, McpServerDef } from '../../core/types.js';
+import type { AgentAdapter, McpServerDef } from '../../core/types.js';
 import { discoverCodexMcpStack } from './discover-mcp.js';
 import { parseCodexTranscript } from './parse-transcript.js';
 
@@ -46,32 +47,32 @@ const adapter: AgentAdapter = {
     return discoverCodexMcpStack(cwd);
   },
 
-  async run(opts): Promise<AgentRunResult> {
+  async run(opts): Promise<void> {
     const codexHome = await setupCodexHome(opts);
 
     const modelArgs = DEFAULT_MODEL ? ['--model', DEFAULT_MODEL] : [];
 
-    const result = await $({
-      cwd: opts.runDir,
-      env: {
-        ...opts.env,
-        CODEX_HOME: codexHome,
-        // Codex requires `OPENAI_API_KEY` to be set even when the provider
-        // uses a different auth mechanism — the gate is unconditional.
-        OPENAI_API_KEY: opts.env.OPENAI_API_KEY ?? 'unused',
-      },
-      timeout: '30m',
-      nothrow: true,
-      stdio: ['ignore', 'pipe', 'pipe'],
-      ...(opts.signal ? { signal: opts.signal } : {}),
-    })`codex exec --json --skip-git-repo-check --dangerously-bypass-approvals-and-sandbox ${modelArgs} -C ${opts.runDir} ${opts.prompt}`;
+    const stderrFd = openSync(opts.stderrPath, 'w');
+    try {
+      const result = await $({
+        cwd: opts.runDir,
+        env: {
+          ...opts.env,
+          CODEX_HOME: codexHome,
+          // Codex requires `OPENAI_API_KEY` to be set even when the provider
+          // uses a different auth mechanism — the gate is unconditional.
+          OPENAI_API_KEY: opts.env.OPENAI_API_KEY ?? 'unused',
+        },
+        timeout: '30m',
+        nothrow: true,
+        stdio: ['ignore', 'pipe', stderrFd],
+        ...(opts.signal ? { signal: opts.signal } : {}),
+      })`codex exec --json --skip-git-repo-check --dangerously-bypass-approvals-and-sandbox ${modelArgs} -C ${opts.runDir} ${opts.prompt}`;
 
-    await fs.writeFile(opts.transcriptPath, result.stdout ?? '');
-
-    return {
-      exitCode: result.exitCode ?? 1,
-      stderrTail: (result.stderr ?? '').slice(-2000),
-    };
+      await fs.writeFile(opts.transcriptPath, result.stdout ?? '');
+    } finally {
+      closeSync(stderrFd);
+    }
   },
 
   parseTranscript(path) {
