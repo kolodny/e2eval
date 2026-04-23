@@ -10,8 +10,12 @@
  *      block — codex does NOT forward its runtime env to MCP subprocesses,
  *      so the wrapper wouldn't see these otherwise.
  *
- * Codex has no CLI deny-flag; like opencode, deny requests are a prompt
- * prefix. Evals that need hard deny should not expose the tool at all.
+ * Codex has no CLI deny-flag, but it does support a hooks.json in CODEX_HOME
+ * (same protocol as claude's, with `hook_event_name` as the discriminator).
+ * The adapter installs a PreToolUse + PostToolUse hook that pipes every
+ * native tool call through the middleware server — `onToolCall` middleware
+ * can deny a call by returning a CallToolResult (the hook will exit 2 and
+ * block it) and observe results via `afterToolCall`.
  *
  * Session resume: codex supports `codex exec resume <thread_id> <prompt>`.
  * The session handle is `{sessionId, codexHome}` — codex looks up rollouts
@@ -21,9 +25,14 @@ import { $, fs } from 'zx';
 import { spawnSync } from 'node:child_process';
 import path from 'node:path';
 import os from 'node:os';
+import { fileURLToPath } from 'node:url';
 import type { AgentAdapter, AgentRunResult, McpServerDef } from '../../core/types.js';
 import { discoverCodexMcpStack } from './discover-mcp.js';
 import { parseCodexTranscript } from './parse-transcript.js';
+
+const HOOK_ADAPTER = fileURLToPath(
+  new URL('./hooks.mjs', import.meta.url),
+);
 
 $.verbose = false;
 
@@ -145,10 +154,26 @@ async function setupCodexHome(opts: {
 
   await fs.writeFile(path.join(home, 'config.toml'), baseToml + '\n' + mcpBlock);
 
-  // Note: codex v0.122 scopes hooks to plugins only — there is no global
-  // `hooks.json` in CODEX_HOME (unlike claude's `~/.claude/settings.json`).
-  // Codex's native tool calls (`command_execution`, `web_search`) are
-  // captured via `parseCodexTranscript` instead.
+  // PreToolUse/PostToolUse hooks — codex looks for hooks.json next to
+  // config.toml in CODEX_HOME. Matcher `.*` covers every native tool; the
+  // hook script pipes payloads to the middleware server where `onToolCall`
+  // middleware can block (via exit 2) and `afterToolCall` observes.
+  await fs.writeJson(path.join(home, 'hooks.json'), {
+    hooks: {
+      PreToolUse: [
+        {
+          matcher: '.*',
+          hooks: [{ type: 'command', command: `node ${HOOK_ADAPTER}`, timeout: 10 }],
+        },
+      ],
+      PostToolUse: [
+        {
+          matcher: '.*',
+          hooks: [{ type: 'command', command: `node ${HOOK_ADAPTER}`, timeout: 10 }],
+        },
+      ],
+    },
+  }, { spaces: 2 });
 
   return home;
 }

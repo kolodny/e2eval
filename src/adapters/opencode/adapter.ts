@@ -11,10 +11,9 @@
  * pwd-discovered MCPs into the run-local config. The agent sees exactly the
  * servers the runner asked to wrap, and nothing else.
  *
- * Tool denial is weaker than Claude's — opencode has no `--disallowed-tools`
- * flag. We pass the denied-tool list as a prompt prefix. Good enough for
- * "don't hit WebSearch", not good enough for hard enforcement. Evals that
- * need hard enforcement should avoid ever making those tools reachable
+ * Opencode has no `--disallowed-tools` flag. The adapter runs with all tools
+ * enabled; any gating is expected to happen in `onToolCall` middleware. Evals
+ * that need hard enforcement should avoid ever making those tools reachable
  * (by not configuring the MCP, not by trying to deny them at call time).
  *
  * `callLLM` supports single-shot and resume (fork + continue session) modes.

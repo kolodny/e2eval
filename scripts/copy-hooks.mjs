@@ -16,6 +16,7 @@ const repoRoot = resolve(here, '..');
 
 const hooks = [
   'adapters/claude/hooks.mjs',
+  'adapters/codex/hooks.mjs',
   'adapters/opencode/hooks.mjs',
 ];
 

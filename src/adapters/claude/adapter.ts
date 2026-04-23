@@ -24,13 +24,6 @@ const HOOK_ADAPTER = fileURLToPath(
 
 $.verbose = false;
 
-const DEFAULT_DENIED = [
-  'WebSearch',
-  'WebFetch',
-  'Bash(*skills/*)',
-  'Bash(*metatron curl*)',
-];
-
 const adapter: AgentAdapter = {
   name: 'claude',
   supportsMcp: true,
@@ -40,7 +33,6 @@ const adapter: AgentAdapter = {
   },
 
   async run(opts): Promise<AgentRunResult> {
-    const denied = DEFAULT_DENIED;
     // Deliberately NO `--strict-mcp-config`: we want claude's normal
     // discovery chain (user-level + pwd `.mcp.json` walk-up) to layer on
     // top of our wrapped config. That way an eval inherits any MCP server
@@ -85,7 +77,7 @@ const adapter: AgentAdapter = {
       nothrow: true,
       stdio: ['ignore', 'pipe', 'pipe'],
       ...(opts.signal ? { signal: opts.signal } : {}),
-    })`claude ${mcpArgs} --settings ${settings} --permission-mode=bypassPermissions --disallowed-tools ${denied} --output-format=stream-json --verbose -p ${opts.prompt}`;
+    })`claude ${mcpArgs} --settings ${settings} --permission-mode=bypassPermissions --output-format=stream-json --verbose -p ${opts.prompt}`;
     const result = await proc;
     await fs.writeFile(opts.transcriptPath, result.stdout ?? '');
 
