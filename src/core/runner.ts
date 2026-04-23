@@ -36,6 +36,7 @@ export type RunnerConfig = {
 
 export type EvalRunOpts = {
   out?: string;
+  /** Remove the per-run scratch dir (`.eval_runs/run_<id>`) after the run. Defaults to true; set `false` to keep it for debugging. */
   cleanupRunDir?: boolean;
 };
 
@@ -196,8 +197,11 @@ async function runEval(ev: Eval, opts: RunOptions): Promise<RunResult> {
     return { grader: graderOutput, transcriptPath, toolLogPath, graderPath };
   } finally {
     opts.middlewareServer?.unregisterRun(runId);
-    if (opts.cleanupRunDir) {
+    if (opts.cleanupRunDir !== false) {
       await fs.remove(runDir).catch(() => {});
+      // rmdir (not remove) — succeeds only if `.eval_runs` is empty, so
+      // concurrent runs keep the parent alive until the last one finishes.
+      await fs.rmdir(path.join(process.cwd(), '.eval_runs')).catch(() => {});
     }
   }
 }
