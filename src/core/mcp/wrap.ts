@@ -13,20 +13,19 @@ import type { McpServerDef } from '../types.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const HERE = path.dirname(__filename);
-// Resolves to the compiled wrapper server in dist/ at runtime (next to this
-// file). Plain node — no tsx dependency in the consumer's install tree.
+const NODE = process.execPath;
 const SERVER = path.join(HERE, 'server.js');
 
 function wrap(name: string, server: McpServerDef): McpServerDef {
   if (server.url) {
     return {
-      command: 'node',
+      command: NODE,
       args: [SERVER, '--type=http', `--name=${name}`, server.url],
     };
   }
   if (server.command) {
     return {
-      command: 'node',
+      command: NODE,
       args: [
         SERVER,
         '--type=stdio',
