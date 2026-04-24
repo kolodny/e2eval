@@ -57,6 +57,12 @@ export function spawnWithStdin(
       resolve(stdout);
     });
 
+    // If the child crashes before Node finishes the stdin write (E2BIG,
+    // startup panic, auth failure, etc.), the pipe closes mid-write and
+    // Node emits 'error'. Without a listener that becomes an unhandled
+    // error and crashes the runner. Swallow it — the 'close' handler
+    // above surfaces the real exit code and stderr tail.
+    child.stdin!.on('error', () => {});
     child.stdin!.end(prompt);
   });
 }

@@ -113,6 +113,22 @@ async function runEval(ev: Eval, opts: RunOptions): Promise<RunResult> {
     const configPath = path.join(runDir, 'eval-config.json');
     await fs.writeJson(configPath, evalConfig, { spaces: 2 });
 
+    const middlewareServerUrl = opts.middlewareServer
+      ? `http://127.0.0.1:${opts.middlewareServer.port}`
+      : '';
+
+    // These vars are read from `process.env` by the MCP wrapper subprocess
+    // (core/mcp/server.ts) and the per-agent hook scripts. `wrapMcpStack`
+    // stamps them onto every wrapped server's env so the wrapper sees them
+    // even when the agent spawns MCP subprocesses with an explicit env
+    // that wouldn't otherwise inherit them.
+    const evalEnv = {
+      EVAL_CONFIG: configPath,
+      EVAL_TOOL_LOG: toolLogPath,
+      EVAL_RUN_ID: runId,
+      EVAL_PLUGIN_SERVER: middlewareServerUrl,
+    };
+
     let mcpConfigPath: string | null = null;
     let discoveredEnv: Record<string, string> = {};
     if (adapter.supportsMcp) {
@@ -121,6 +137,7 @@ async function runEval(ev: Eval, opts: RunOptions): Promise<RunResult> {
       const wrapped = wrapMcpStack({
         mcpServers,
         skip: opts.ignoreMcps ?? [],
+        env: evalEnv,
       });
       mcpConfigPath = path.join(runDir, 'mcp.json');
       await fs.writeJson(mcpConfigPath, wrapped, { spaces: 2 });
@@ -141,10 +158,6 @@ async function runEval(ev: Eval, opts: RunOptions): Promise<RunResult> {
       abort,
     });
 
-    const middlewareServerUrl = opts.middlewareServer
-      ? `http://127.0.0.1:${opts.middlewareServer.port}`
-      : '';
-
     await adapter.run({
       prompt,
       mcpConfigPath,
@@ -152,10 +165,7 @@ async function runEval(ev: Eval, opts: RunOptions): Promise<RunResult> {
       env: {
         ...process.env as Record<string, string>,
         ...discoveredEnv,
-        EVAL_CONFIG: configPath,
-        EVAL_TOOL_LOG: toolLogPath,
-        EVAL_RUN_ID: runId,
-        EVAL_PLUGIN_SERVER: middlewareServerUrl,
+        ...evalEnv,
       },
       transcriptPath,
       stderrPath,

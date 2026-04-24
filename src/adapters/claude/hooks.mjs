@@ -46,17 +46,20 @@ async function main() {
   try { payload = JSON.parse(raw); }
   catch { return; }
 
-  const hookType = String(payload.hook_type ?? '');
+  // Claude Code payloads carry `hook_event_name`; the `hook_type` fallback
+  // is a belt-and-suspenders for any older/forked build that still emits
+  // the old field.
+  const hookEvent = String(payload.hook_event_name ?? payload.hook_type ?? '');
 
   payload.runId = RUN_ID;
 
-  if (hookType === 'PreToolUse') {
+  if (hookEvent === 'PreToolUse') {
     const result = await post('/pre-tool', payload);
     if (result?.block) {
       process.stderr.write(result.message + '\n');
       process.exit(2);
     }
-  } else if (hookType === 'PostToolUse') {
+  } else if (hookEvent === 'PostToolUse') {
     await post('/post-tool', payload);
   }
   // Other hook types (Notification, SessionStart, UserPromptSubmit,

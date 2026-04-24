@@ -6,10 +6,10 @@
  * as a child of codex, so it inherits the EVAL_PLUGIN_SERVER / EVAL_RUN_ID
  * env the adapter set when spawning codex.
  *
- * Protocol is the same as claude's: read the hook payload from stdin, POST
+ * Protocol is identical to claude's: read the hook payload from stdin, POST
  * to the middleware server, and (for PreToolUse) exit 2 with a stderr
- * message to block the tool. The only difference is codex's event
- * discriminator: `hook_event_name` vs claude's `hook_type`.
+ * message to block the tool. Both agents use `hook_event_name` as the
+ * event discriminator.
  */
 import http from 'node:http';
 
