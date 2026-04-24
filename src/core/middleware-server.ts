@@ -158,13 +158,12 @@ export async function startMiddlewareServer(
   // ──────────────────────────── Native tool endpoints (/pre-tool, /post-tool)
 
   function parseNativePayload(body: any): {
-    tool: string; input: unknown; response: unknown; pluginType: string;
+    tool: string; input: unknown; response: unknown;
   } {
     return {
       tool: String(body.tool_name ?? body.tool ?? ''),
       input: body.tool_input ?? body.args ?? body.input ?? {},
       response: body.tool_response ?? body.output ?? body.response ?? null,
-      pluginType: body.plugin_type ?? body.pluginType ?? 'post',
     };
   }
 

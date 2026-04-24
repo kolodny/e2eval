@@ -1,17 +1,14 @@
 /**
- * Reads the wrapper's tool log into `ToolCall[]`.
+ * Reads the tool log into `ToolCall[]`.
  *
  * The log has three kinds of entries:
  *   - `request` — what the agent asked for (tool name + input)
  *   - `result`  — what we returned (post-middleware-chain content, isError flag)
  *   - `audit`   — diagnostic notes (e.g. the list_tools output-schema strip)
  *
- * We correlate request + result by `callId` (synthetic monotonic per server
- * assigned in `server.ts`). Audit entries are ignored.
- *
- * A request without a matching result means the agent triggered a call that
- * was aborted (e.g. short-circuited exception) — we emit those too, with
- * empty resultText, so they're visible to the grader.
+ * Request + result correlate by `callId`. Audit entries are ignored here.
+ * A request without a matching result means the agent triggered a call
+ * that was aborted; we emit those with empty resultText.
  */
 import { readFileSync, existsSync } from 'node:fs';
 import type { ToolCall } from '../types.js';
@@ -21,7 +18,7 @@ type Entry =
   | { kind: 'result'; ts: number; callId: string; server: string; tool: string; isError: boolean; content: string; contentBytes: number }
   | { kind: 'audit'; ts: number; callId: string; server: string; tool: string; plugin: string; [k: string]: unknown };
 
-export function readMcpToolLog(path: string): ToolCall[] {
+export function readToolLog(path: string): ToolCall[] {
   if (!existsSync(path)) return [];
   const lines = readFileSync(path, 'utf8').split('\n').filter(Boolean);
 

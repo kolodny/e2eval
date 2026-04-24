@@ -4,16 +4,10 @@
  * Event shape (per line):
  *   {type:'step_start', sessionID, part:{...}}
  *   {type:'text',       sessionID, part:{type:'text', text:'...'}}
- *   {type:'tool_use',   sessionID, part:{type:'tool', tool:'<name>', ...}}
  *   {type:'step_finish', sessionID, part:{...}}
  *
- * We concatenate all `text` parts for the final answer (opencode may stream
- * multiple chunks for a single logical answer).
- *
- * `nativeToolCalls` is always empty. The opencode hooks adapter
- * (`adapters/opencode/hooks.mjs`) logs every opencode tool call (native
- * AND MCP) into `$EVAL_TOOL_LOG` via the `tool.execute.after` event, so
- * extracting them here too would just duplicate entries.
+ * Opencode may stream multiple `text` parts for a single answer, so we
+ * concatenate them.
  */
 import { readFileSync } from 'node:fs';
 import type { NormalizedTranscript } from '../../core/types.js';
@@ -37,5 +31,5 @@ export function parseOpencodeTranscript(jsonlPath: string): NormalizedTranscript
     }
   }
 
-  return { finalAnswer: textChunks.join(''), nativeToolCalls: [], sessionId };
+  return { finalAnswer: textChunks.join(''), sessionId };
 }

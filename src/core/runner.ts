@@ -13,6 +13,7 @@
 import { fs, $ } from 'zx';
 import { readFileSync, existsSync } from 'node:fs';
 import path from 'node:path';
+import os from 'node:os';
 import { randomUUID } from 'node:crypto';
 
 import type {
@@ -21,7 +22,7 @@ import type {
 } from './types.js';
 import { startMiddlewareServer, type MiddlewareServer } from './middleware-server.js';
 import { wrapMcpStack } from './mcp/wrap.js';
-import { readMcpToolLog } from './mcp/tool-log.js';
+import { readToolLog } from './mcp/tool-log.js';
 
 $.verbose = false;
 
@@ -52,7 +53,7 @@ export async function startRunner(config: RunnerConfig): Promise<EvalRunner> {
 
   return {
     async run(ev, opts = {}) {
-      const out = opts.out ?? `/tmp/eval-${ev.name}`;
+      const out = opts.out ?? path.join(os.tmpdir(), `eval-${ev.name}`);
       return runEval(ev, {
         adapter: config.adapter,
         out,
@@ -169,12 +170,9 @@ async function runEval(ev: Eval, opts: RunOptions): Promise<RunResult> {
     }
 
     const runIdCheck = checkToolLogRunId(toolLogPath, runId);
+    const { finalAnswer, sessionId } = adapter.parseTranscript(transcriptPath);
+    const toolCalls = readToolLog(toolLogPath);
 
-    const native = adapter.parseTranscript(transcriptPath);
-    const mcpCalls = readMcpToolLog(toolLogPath);
-    const toolCalls = [...mcpCalls, ...native.nativeToolCalls];
-
-    const sessionId = native.sessionId;
     const baseCallLLM = opts.callLLM ?? adapter.callLLM;
     const callLLM: CallLLM = (prompt, callOpts) =>
       baseCallLLM(prompt, { ...callOpts, cwd: runDir, ...(callOpts?.resume && sessionId ? { sessionId } : {}) });
@@ -182,7 +180,7 @@ async function runEval(ev: Eval, opts: RunOptions): Promise<RunResult> {
     const graderOutput = await grade({
       evalName: ev.name,
       question: ev.question,
-      finalAnswer: native.finalAnswer,
+      finalAnswer,
       toolCalls,
       config: evalConfig as any,
       middleware: opts.middleware ?? [],
@@ -259,19 +257,18 @@ async function grade(opts: {
 // ────────────────────────────────────────────────────────────── Integrity checks
 
 function checkToolLogRunId(logPath: string, expected: string) {
-  if (!existsSync(logPath)) return { total: 0, mismatch: 0, missing: 0 };
+  if (!existsSync(logPath)) return { mismatch: 0, missing: 0 };
   const src = readFileSync(logPath, 'utf8');
-  if (!src) return { total: 0, mismatch: 0, missing: 0 };
-  let mismatch = 0, missing = 0, total = 0;
+  if (!src) return { mismatch: 0, missing: 0 };
+  let mismatch = 0, missing = 0;
   for (const line of src.split('\n')) {
     if (!line) continue;
-    total += 1;
     try {
       const e = JSON.parse(line);
       if (typeof e.runId !== 'string') missing += 1;
       else if (e.runId !== expected) mismatch += 1;
     } catch { missing += 1; }
   }
-  return { total, mismatch, missing };
+  return { mismatch, missing };
 }
 

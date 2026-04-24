@@ -3,14 +3,8 @@
  *
  * Schema (one JSON object per line):
  *   {type:'system', subtype:'init', session_id, ...}
- *   {type:'assistant', message:{role:'assistant', content:[{type:'tool_use',id,name,input}, {type:'text',text}, ...]}}
- *   {type:'user',      message:{role:'user',      content:[{type:'tool_result', tool_use_id, content}, ...]}}
+ *   {type:'assistant', message:{role:'assistant', content:[{type:'text',text}, ...]}}
  *   {type:'result',    result:'<final string>'}
- *
- * `nativeToolCalls` is always empty. The PostToolUse hook
- * (`adapters/claude/hooks.mjs`) writes every Claude tool call
- * (native AND MCP) into `$EVAL_TOOL_LOG`, so extracting them here too
- * would just duplicate entries and skew grader counts.
  */
 import { readFileSync } from 'node:fs';
 import type { NormalizedTranscript } from '../../core/types.js';
@@ -41,5 +35,5 @@ export function parseClaudeTranscript(jsonlPath: string): NormalizedTranscript {
     }
   }
 
-  return { finalAnswer, nativeToolCalls: [], sessionId };
+  return { finalAnswer, sessionId };
 }

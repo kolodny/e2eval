@@ -178,7 +178,6 @@ export type ToolCall = {
 /** What the adapter returns after parsing its native transcript. */
 export type NormalizedTranscript = {
   finalAnswer: string;
-  nativeToolCalls: ToolCall[];
   sessionId?: string;
 };
 

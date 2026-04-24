@@ -85,17 +85,18 @@ const adapter: AgentAdapter = {
   async callLLM(prompt, opts) {
     const timeout = opts?.timeout ?? 240_000;
     const env = { ...process.env, OPENAI_API_KEY: process.env.OPENAI_API_KEY ?? 'unused' };
+    const isResume = !!(opts?.resume && opts.sessionId);
 
-    const args = opts?.resume && opts.sessionId
-      ? ['exec', 'resume', opts.sessionId, '--json', '--skip-git-repo-check', '--sandbox', 'read-only']
-      : ['exec', '--json', '--skip-git-repo-check', '--sandbox', 'read-only', '--ignore-user-config'];
+    const args = ['exec'];
+    if (isResume) args.push('resume', opts!.sessionId!);
+    args.push('--json', '--skip-git-repo-check', '--sandbox', 'read-only');
+    if (!isResume) args.push('--ignore-user-config');
     if (opts?.systemPrompt) args.push('--config', `developer_instructions="${opts.systemPrompt}"`);
     if (opts?.model) args.push('--model', opts.model);
 
     const stdout = await spawnWithStdin('codex', args, prompt, { timeout, env });
     try {
-      const parsed = JSON.parse(stdout);
-      return parsed?.items?.find((i: any) => i.type === 'message')?.content?.[0]?.text ?? '';
+      return JSON.parse(stdout)?.items?.find((i: any) => i.type === 'message')?.content?.[0]?.text ?? '';
     } catch {
       return stdout;
     }

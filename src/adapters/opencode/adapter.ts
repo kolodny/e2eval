@@ -27,7 +27,7 @@ const OPENCODE_PLUGIN = fileURLToPath(
 
 $.verbose = false;
 
-const DEFAULT_MODEL = process.env.OPENCODE_MODEL ?? 'ncp-anthropic/claude-sonnet-4-6';
+const DEFAULT_MODEL = process.env.OPENCODE_MODEL ?? null;
 
 // Linux execve caps any single argv entry at 32 × PAGE_SIZE = 131072 bytes.
 // We reserve a little headroom for other argv entries on the same line.
@@ -90,7 +90,7 @@ const adapter: AgentAdapter = {
         nothrow: true,
         stdio: ['ignore', 'pipe', stderrFd],
         ...(opts.signal ? { signal: opts.signal } : {}),
-      })`opencode run --format json --dangerously-skip-permissions --model ${DEFAULT_MODEL} ${opts.prompt}`;
+      })`opencode run --format json --dangerously-skip-permissions ${DEFAULT_MODEL ? ['--model', DEFAULT_MODEL] : []} ${opts.prompt}`;
       const result = await proc;
       await fs.writeFile(opts.transcriptPath, result.stdout ?? '');
     } finally {
@@ -103,7 +103,7 @@ const adapter: AgentAdapter = {
     return result;
   },
 
-  callLLM(prompt, opts) {
+  async callLLM(prompt, opts) {
     const timeout = opts?.timeout ?? 240_000;
     const model = opts?.model ?? DEFAULT_MODEL;
     const fullPrompt = opts?.systemPrompt
@@ -111,22 +111,27 @@ const adapter: AgentAdapter = {
       : prompt;
     assertPromptFitsArgv(fullPrompt);
 
-    const args = opts?.resume && opts.sessionId
-      ? ['run', '--format', 'json', '--dangerously-skip-permissions', '--continue', '--session', opts.sessionId, '--fork', '--model', model, fullPrompt]
-      : ['run', '--format', 'json', '--pure', '--dangerously-skip-permissions', '--model', model, fullPrompt];
+    const args = ['run', '--format', 'json', '--dangerously-skip-permissions'];
+    if (opts?.resume && opts.sessionId) {
+      args.push('--continue', '--session', opts.sessionId, '--fork');
+    } else {
+      args.push('--pure');
+    }
+    if (model) args.push('--model', model);
+    args.push(fullPrompt);
 
     const res = spawnSync('opencode', args, {
       encoding: 'utf8', maxBuffer: 50 * 1024 * 1024, timeout, stdio: ['ignore', 'pipe', 'pipe'],
     });
-    if (res.error) return Promise.reject(res.error);
+    if (res.error) throw res.error;
     if (res.status !== 0) {
-      return Promise.reject(new Error(`opencode exited ${res.status}${res.signal ? ` (${res.signal})` : ''}\n${(res.stderr ?? '').slice(-2000)}`));
+      throw new Error(`opencode exited ${res.status}${res.signal ? ` (${res.signal})` : ''}\n${(res.stderr ?? '').slice(-2000)}`);
     }
+    const stdout = res.stdout ?? '';
     try {
-      const parsed = JSON.parse(res.stdout ?? '');
-      return Promise.resolve(parsed?.response ?? res.stdout ?? '');
+      return JSON.parse(stdout)?.response ?? stdout;
     } catch {
-      return Promise.resolve(res.stdout ?? '');
+      return stdout;
     }
   },
 };

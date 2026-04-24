@@ -80,21 +80,11 @@ const adapter: AgentAdapter = {
       hooks: { PreToolUse: [{ matcher: '', hooks: [{ type: 'command', command: 'exit 2' }] }] },
     });
 
-    const args = opts?.resume && opts.sessionId
-      ? [
-          '-p',
-          '--resume', opts.sessionId,
-          '--fork-session',
-          '--settings', denyAllTools,
-          '--strict-mcp-config',
-          '--mcp-config', '{"mcpServers":{}}',
-        ]
-      : [
-          '-p',
-          '--settings', denyAllTools,
-          '--strict-mcp-config',
-          '--mcp-config', '{"mcpServers":{}}',
-        ];
+    const args = ['-p'];
+    if (opts?.resume && opts.sessionId) {
+      args.push('--resume', opts.sessionId, '--fork-session');
+    }
+    args.push('--settings', denyAllTools, '--strict-mcp-config', '--mcp-config', '{"mcpServers":{}}');
     if (opts?.systemPrompt) args.push('--append-system-prompt', opts.systemPrompt);
     if (opts?.model) args.push('--model', opts.model);
 
