@@ -1,28 +1,16 @@
 /**
  * Opencode adapter.
  *
- * Opencode reads MCP config from `opencode.jsonc` at `~/.config/opencode/`
- * (user) or the CWD (project-local, overrides user). For eval runs we write
- * a project-local `opencode.jsonc` into runDir with the wrapped MCP map
- * translated to opencode's `{type:'local', command:[cmd, ...args]}` shape.
+ * Writes a project-local `opencode.jsonc` into runDir with the wrapped MCP
+ * map translated to opencode's `{type:'local', command:[cmd, ...args]}`
+ * shape. Opencode spawns every configured MCP server at startup and has no
+ * per-run override, so pwd-discovered MCPs are *not* merged in.
  *
- * Unlike claude, opencode has no native walk-up for per-run overrides, and
- * it spawns every configured MCP server at startup — so we don't merge
- * pwd-discovered MCPs into the run-local config. The agent sees exactly the
- * servers the runner asked to wrap, and nothing else.
- *
- * Opencode has no `--disallowed-tools` flag. The adapter runs with all tools
- * enabled; any gating is expected to happen in `onToolCall` middleware. Evals
- * that need hard enforcement should avoid ever making those tools reachable
- * (by not configuring the MCP, not by trying to deny them at call time).
- *
- * `callLLM` supports single-shot and resume (fork + continue session) modes.
- *
- * Prompt-size limit: unlike claude/codex, `opencode run` does NOT accept the
- * prompt on stdin (upstream issue — see https://github.com/anomalyco/opencode/issues/18659),
- * so the prompt goes through argv and hits Linux's MAX_ARG_STRLEN cap
- * (128KB per argv entry). The adapter throws loudly on oversized prompts
- * instead of letting execve fail silently with E2BIG + empty stdout.
+ * Prompt-size limit: `opencode run` does not accept stdin prompts
+ * (https://github.com/anomalyco/opencode/issues/18659), so the prompt goes
+ * through argv and hits Linux's MAX_ARG_STRLEN cap (128KB per entry). The
+ * adapter throws on oversized prompts instead of letting execve fail
+ * silently with E2BIG.
  */
 import { $, fs } from 'zx';
 import { spawnSync } from 'node:child_process';
@@ -65,11 +53,6 @@ const adapter: AgentAdapter = {
   },
 
   async run(opts): Promise<void> {
-    // Write ONLY the wrapped set to runDir/opencode.jsonc. We don't merge in
-    // pwd-discovered MCPs because opencode spawns every entry at startup —
-    // bundling the user's ambient stack (newt-exec, playwright, etc.) can
-    // add minutes of boot time for no gain, and opencode has no native
-    // walk-up for per-run overrides anyway.
     const wrappedMap: Record<string, McpServerDef> = opts.mcpConfigPath
       ? (await fs.readJson(opts.mcpConfigPath)).mcpServers ?? {}
       : {};
@@ -85,9 +68,8 @@ const adapter: AgentAdapter = {
       }
     }
 
-    // Copy the plugin file into runDir so opencode can load it with a
-    // relative `./` reference. Opencode's plugin loader rejects bare absolute
-    // FS paths on some versions; relative-in-cwd is the portable form.
+    // Opencode's plugin loader rejects absolute paths on some versions —
+    // copy into runDir and reference it relative-in-cwd.
     const pluginDst = path.join(opts.runDir, 'e2eval-plugin.mjs');
     await fs.copy(OPENCODE_PLUGIN, pluginDst);
     await fs.writeJson(path.join(opts.runDir, 'opencode.jsonc'), {
@@ -96,9 +78,8 @@ const adapter: AgentAdapter = {
       plugin: ['./e2eval-plugin.mjs'],
     }, { spaces: 2 });
 
-    // `stdio: ['ignore', 'pipe', 'pipe']`: opencode blocks reading stdin
-    // when a writable pipe is inherited (zx's default). Close the handle
-    // so opencode sees EOF immediately and proceeds.
+    // stdio[0]='ignore': opencode blocks reading stdin when it inherits
+    // a writable pipe (zx's default); closed stdin makes it proceed.
     assertPromptFitsArgv(opts.prompt);
     const stderrFd = openSync(opts.stderrPath, 'w');
     try {

@@ -52,7 +52,6 @@ const adapter: AgentAdapter = {
 
     const modelArgs = DEFAULT_MODEL ? ['--model', DEFAULT_MODEL] : [];
 
-    // Prompt piped via stdin (not argv) — see core/process.ts for why.
     // Codex reads the prompt from stdin when no positional prompt is given.
     const stderrFd = openSync(opts.stderrPath, 'w');
     try {
@@ -87,7 +86,6 @@ const adapter: AgentAdapter = {
     const timeout = opts?.timeout ?? 240_000;
     const env = { ...process.env, OPENAI_API_KEY: process.env.OPENAI_API_KEY ?? 'unused' };
 
-    // Prompt piped via stdin (not argv) — see core/process.ts for why.
     const args = opts?.resume && opts.sessionId
       ? ['exec', 'resume', opts.sessionId, '--json', '--skip-git-repo-check', '--sandbox', 'read-only']
       : ['exec', '--json', '--skip-git-repo-check', '--sandbox', 'read-only', '--ignore-user-config'];
@@ -119,14 +117,13 @@ async function setupCodexHome(opts: {
 
   const userHome = process.env.CODEX_HOME || path.join(os.homedir(), '.codex');
 
-  // auth.json — copy so codex can authenticate. Hardlink would be fine too.
   const userAuth = path.join(userHome, 'auth.json');
   if (fs.existsSync(userAuth)) {
     await fs.copy(userAuth, path.join(home, 'auth.json'));
   }
 
-  // Start from user config (provider definitions etc.), strip any existing
-  // mcp_servers entries so ours fully replace them.
+  // Start from user config (provider definitions etc.); our mcp_servers
+  // entries below fully replace the user's.
   let baseToml = '';
   const userCfg = path.join(userHome, 'config.toml');
   if (fs.existsSync(userCfg)) {
@@ -134,7 +131,6 @@ async function setupCodexHome(opts: {
     baseToml = stripMcpServersSections(baseToml);
   }
 
-  // Append our wrapped MCP stack as TOML.
   const mcpBlock = opts.mcpConfigPath
     ? renderMcpServersToml(
         (await fs.readJson(opts.mcpConfigPath)).mcpServers,
@@ -188,12 +184,8 @@ function renderMcpServersToml(
   servers: Record<string, McpServerDef>,
   env: Record<string, string>,
 ): string {
-  // Codex does NOT forward its runtime env to MCP subprocesses, so we embed
-  // the env the wrapper needs into each `[mcp_servers.<name>.env]` block.
-  // Propagate:
-  //   - PATH (so node/binaries resolve)
-  //   - every `EVAL_*` var the runner set (EVAL_TOOL_LOG, EVAL_CONFIG,
-  //     EVAL_RUN_ID, plus any future ones the runner adds)
+  // Codex doesn't forward its runtime env to MCP subprocesses, so PATH and
+  // every EVAL_* var the runner set are embedded per-server below.
   const evalEnv: Record<string, string> = {};
   for (const [k, v] of Object.entries(env)) {
     if (k.startsWith('EVAL_') && typeof v === 'string') evalEnv[k] = v;

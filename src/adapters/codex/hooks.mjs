@@ -68,6 +68,4 @@ async function main() {
   // UserPromptSubmit, Stop) are no-ops.
 }
 
-main().catch((e) => {
-  process.stderr.write(`[codex-hooks] fatal: ${e.stack ?? e}\n`);
-});
+main();

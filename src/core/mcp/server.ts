@@ -1,24 +1,16 @@
 #!/usr/bin/env node
 /**
- * MCP wrapper server — agent-agnostic.
- *
- * Sits between an MCP-speaking agent and a real MCP backend, routes every
- * `tools/call` through the middleware chain, and writes a structured tool log
- * (`EVAL_TOOL_LOG`) that captures every request/response pair.
- *
- * The tool log is the grader's authoritative source for MCP traffic — no
- * more dependency on the agent's native transcript format for MCP calls.
- * The agent's transcript contributes only the final answer and any
- * non-MCP (agent-built-in) tool calls.
+ * MCP wrapper server — agent-agnostic. Sits between an MCP-speaking agent
+ * and a real MCP backend, routes every `tools/call` through the middleware
+ * chain, and writes a structured tool log (`EVAL_TOOL_LOG`).
  *
  * Log schema (one JSON object per line):
  *   {ts, kind: 'request',  callId, server, tool, input}
  *   {ts, kind: 'result',   callId, server, tool, isError, content, contentBytes}
  *   {ts, kind: 'audit',    callId, server, tool, plugin, ...customFields}
  *
- * `callId` is a synthetic monotonic id assigned here — the runner correlates
- * request and result by `callId`. The agent's own tool_use_ids are opaque
- * to us (not all agents expose them) and are intentionally not used.
+ * `callId` is a synthetic monotonic id — the runner correlates request and
+ * result by it. Agent tool_use_ids aren't used (not all agents expose them).
  */
 import { mcpMiddleware } from 'mcp-middleware';
 import { StdioClientTransport as Stdio } from '@modelcontextprotocol/sdk/client/stdio.js';
@@ -35,8 +27,6 @@ import http from 'node:http';
 
 import type { Config } from '../types.js';
 
-// The middleware server runs in the runner process. We POST to it for onToolCall
-// and afterToolCall. No config import here — the middleware server owns all state.
 const PLUGIN_SERVER = process.env.EVAL_PLUGIN_SERVER ?? '';
 
 function postJson(urlStr: string, body: unknown): Promise<any> {
@@ -156,9 +146,8 @@ const { connect } = await mcpMiddleware({
     const tool = originalRequest.params.name;
     const callId = nextCallId();
 
-    // Log the request BEFORE running the middleware chain — captures what the
-    // agent actually asked for. Middleware-mutated args show up as separate
-    // audit entries via the middleware's `audit` callback.
+    // Log the request before the middleware chain runs, so mutated args
+    // don't overwrite what the agent actually asked for.
     writeLog(TOOL_LOG, {
       kind: 'request',
       callId,
@@ -198,8 +187,8 @@ const { connect } = await mcpMiddleware({
       result = (await client.request(originalRequest, z.any(), extra)) as CallToolResult;
     }
 
-    // Log the result the agent actually sees — post-middleware-chain, so scrubbed
-    // responses are recorded as scrubbed. This is the grader's evidence.
+    // Log the result after the middleware chain, so scrubbed responses
+    // are recorded as the agent saw them.
     const content = JSON.stringify(result.content ?? []);
     writeLog(TOOL_LOG, {
       kind: 'result',

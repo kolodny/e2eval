@@ -29,8 +29,13 @@ export interface Config {}
 export type MiddlewareContext = {
   evalName: string;
   config: Readonly<Config>;
-  /** Abort the current eval run. Kills the agent process if still running. */
-  abort(reason?: string): void;
+  /**
+   * Abort the current eval run. Kills the agent process if still running
+   * and causes the outer `runner.run()` promise to reject with `reason`.
+   * Matches the `AbortController.abort` signature — pass an Error to
+   * preserve its stack, or anything else and it will be wrapped.
+   */
+  abort(reason?: unknown): void;
 };
 
 /**
@@ -48,10 +53,8 @@ export type OnToolCallArg = MiddlewareContext & {
 };
 
 /**
- * Context for `afterToolCall` — the tool has already run, the agent
- * has already received the response. Plugins can only observe and flag, not
- * modify. This covers both MCP tools (after surgical plugins ran) and native
- * tools (Bash, Read, etc.) when wired through the PostToolUse adapter.
+ * Context for `afterToolCall` — the tool has already run and the agent has
+ * already received the response. Middleware can observe but not modify.
  */
 export type AfterToolCallArg = MiddlewareContext & {
   /** MCP server name, or 'native' for non-MCP tools (Bash, Read, etc.). */
@@ -143,17 +146,10 @@ export type Middleware = {
 
 // ────────────────────────────────────────────────────────────── Eval
 
-/**
- * An eval definition — default-exported from each file under `myevals/`.
- *
- * Deliberately agent-agnostic: the `config` field describes *what scrubbing
- * and ground-truth detection should apply*, not *which agent* runs it. The
- * agent is selected at run time via `startRunner({ adapter })`.
- */
+/** An eval definition. The agent is selected at run time via `startRunner({ adapter })`. */
 export type Eval = {
-  /** Used for output paths and audit entries. */
   name: string;
-  /** The question posed to the agent. Emitted verbatim as the prompt. */
+  /** The question posed to the agent. */
   question: string;
   /** Middleware-provided options. Fields come from middleware `declare module` blocks. */
   config?: Config;

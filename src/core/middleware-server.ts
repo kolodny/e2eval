@@ -24,12 +24,21 @@ function writeLog(filePath: string, entry: Record<string, unknown>, runId: strin
   } catch { /* best-effort */ }
 }
 
+function wrapMiddlewareError(
+  middlewareName: string,
+  phase: 'onToolCall' | 'afterToolCall',
+  err: unknown,
+): Error {
+  const original = err instanceof Error ? err : new Error(String(err));
+  return new Error(`middleware ${middlewareName}.${phase} threw: ${original.message}`, { cause: original });
+}
+
 export type RunContext = {
   evalName: string;
   config: Readonly<Config>;
   toolLogPath: string;
   runId: string;
-  abort?: (reason?: string) => void;
+  abort?: (reason?: unknown) => void;
 };
 
 export type MiddlewareServer = {
@@ -94,6 +103,7 @@ export async function startMiddlewareServer(
         if (handlerWasCalled) return { action: 'proceed' };
         if (result !== undefined) return { action: 'respond', response: result };
       } catch (e) {
+        ctx.abort?.(wrapMiddlewareError(mw.name, 'onToolCall', e));
         return {
           action: 'respond',
           response: {
@@ -134,6 +144,7 @@ export async function startMiddlewareServer(
         });
         if (result !== undefined) currentResponse = result;
       } catch (e) {
+        ctx.abort?.(wrapMiddlewareError(mw.name, 'onToolCall', e));
         currentResponse = {
           content: [{ type: 'text' as const, text: `[${mw.name} failed: ${(e as Error).message}]` }],
           isError: true,
@@ -198,6 +209,7 @@ export async function startMiddlewareServer(
           return { block: true, message: msg };
         }
       } catch (e) {
+        ctx.abort?.(wrapMiddlewareError(mw.name, 'onToolCall', e));
         return { block: true, message: `[${mw.name} failed: ${(e as Error).message}]` };
       }
     }
@@ -258,8 +270,8 @@ export async function startMiddlewareServer(
           config: ctx.config,
           abort: ctx.abort ?? noop,
         });
-      } catch {
-        // swallow — middleware is responsible for its own error handling
+      } catch (e) {
+        ctx.abort?.(wrapMiddlewareError(mw.name, 'afterToolCall', e));
       }
     }
   }

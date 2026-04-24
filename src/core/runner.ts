@@ -84,10 +84,15 @@ type RunOptions = {
 async function runEval(ev: Eval, opts: RunOptions): Promise<RunResult> {
   const adapter = opts.adapter;
 
-  const transcriptPath = `${opts.out}.${adapter.name}.jsonl`;
-  const toolLogPath = `${opts.out}.${adapter.name}.tool-log.jsonl`;
-  const graderPath = `${opts.out}.${adapter.name}.grader.json`;
-  const stderrPath = `${opts.out}.${adapter.name}.stderr.log`;
+  // Resolve out to an absolute path once — the sibling paths travel through
+  // subprocesses (MCP wrapper, agent CLI) whose cwd is `runDir`, not the
+  // caller's cwd. Any relative component would silently resolve against the
+  // wrong directory and writes would fail with ENOENT.
+  const resolvedOut = path.resolve(opts.out);
+  const transcriptPath = `${resolvedOut}.${adapter.name}.jsonl`;
+  const toolLogPath = `${resolvedOut}.${adapter.name}.tool-log.jsonl`;
+  const graderPath = `${resolvedOut}.${adapter.name}.grader.json`;
+  const stderrPath = `${resolvedOut}.${adapter.name}.stderr.log`;
 
   for (const p of [transcriptPath, toolLogPath, graderPath, stderrPath]) {
     await fs.remove(p);
@@ -98,7 +103,7 @@ async function runEval(ev: Eval, opts: RunOptions): Promise<RunResult> {
   const shortId = runId.slice(0, 8);
   const runDir = path.join(process.cwd(), '.eval_runs', `run_${shortId}`);
   const ac = new AbortController();
-  const abort = (reason?: string) => ac.abort(new Error(reason ?? 'aborted by middleware'));
+  const abort = (reason?: unknown) => ac.abort(reason);
 
   await fs.ensureDir(runDir);
   try {
@@ -123,12 +128,8 @@ async function runEval(ev: Eval, opts: RunOptions): Promise<RunResult> {
     let prompt = ev.question;
     for (const mw of opts.middleware ?? []) {
       if (!mw.beforeEval) continue;
-      try {
-        const result = await mw.beforeEval({ evalName: ev.name, prompt, config: evalConfig as any, abort });
-        if (result?.replacePromptWith) prompt = result.replacePromptWith;
-      } catch {
-        // swallow — middleware is responsible for its own error handling
-      }
+      const result = await mw.beforeEval({ evalName: ev.name, prompt, config: evalConfig as any, abort });
+      if (result?.replacePromptWith) prompt = result.replacePromptWith;
     }
 
     opts.middlewareServer?.registerRun({
@@ -159,6 +160,13 @@ async function runEval(ev: Eval, opts: RunOptions): Promise<RunResult> {
       stderrPath,
       signal: ac.signal,
     });
+
+    // Middleware can abort via the HTTP bridge; surface that as a rejection.
+    if (ac.signal.aborted) {
+      throw ac.signal.reason instanceof Error
+        ? ac.signal.reason
+        : new Error(String(ac.signal.reason ?? 'run aborted'));
+    }
 
     const runIdCheck = checkToolLogRunId(toolLogPath, runId);
 
@@ -217,7 +225,7 @@ async function grade(opts: {
   middleware: readonly Middleware[];
   callLLM: CallLLM;
   stderrPath: string;
-  abort: (reason?: string) => void;
+  abort: (reason?: unknown) => void;
 }): Promise<GraderOutput> {
   const { question, finalAnswer, toolCalls } = opts;
 
@@ -226,23 +234,19 @@ async function grade(opts: {
 
   for (const mw of opts.middleware) {
     if (!mw.afterEval) continue;
-    try {
-      const result = await mw.afterEval({
-        evalName: opts.evalName,
-        question,
-        answer: finalAnswer,
-        toolCalls,
-        config: opts.config,
-        scores,
-        callLLM: opts.callLLM,
-        stderrPath: opts.stderrPath,
-        abort: opts.abort,
-      });
-      if (result?.data !== undefined) middlewareOutputs[mw.name] = result.data;
-      if (result?.score) scores.push({ middleware: mw.name, ...result.score });
-    } catch {
-      // swallow — middleware is responsible for its own error handling
-    }
+    const result = await mw.afterEval({
+      evalName: opts.evalName,
+      question,
+      answer: finalAnswer,
+      toolCalls,
+      config: opts.config,
+      scores,
+      callLLM: opts.callLLM,
+      stderrPath: opts.stderrPath,
+      abort: opts.abort,
+    });
+    if (result?.data !== undefined) middlewareOutputs[mw.name] = result.data;
+    if (result?.score) scores.push({ middleware: mw.name, ...result.score });
   }
 
   return {

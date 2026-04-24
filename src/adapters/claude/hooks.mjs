@@ -64,6 +64,4 @@ async function main() {
   // tool events.
 }
 
-main().catch((e) => {
-  process.stderr.write(`[claude-hooks] fatal: ${e.stack ?? e}\n`);
-});
+main();
