@@ -17,6 +17,12 @@
  * (by not configuring the MCP, not by trying to deny them at call time).
  *
  * `callLLM` supports single-shot and resume (fork + continue session) modes.
+ *
+ * Prompt-size limit: unlike claude/codex, `opencode run` does NOT accept the
+ * prompt on stdin (upstream issue — see https://github.com/anomalyco/opencode/issues/18659),
+ * so the prompt goes through argv and hits Linux's MAX_ARG_STRLEN cap
+ * (128KB per argv entry). The adapter throws loudly on oversized prompts
+ * instead of letting execve fail silently with E2BIG + empty stdout.
  */
 import { $, fs } from 'zx';
 import { spawnSync } from 'node:child_process';
@@ -34,6 +40,21 @@ const OPENCODE_PLUGIN = fileURLToPath(
 $.verbose = false;
 
 const DEFAULT_MODEL = process.env.OPENCODE_MODEL ?? 'ncp-anthropic/claude-sonnet-4-6';
+
+// Linux execve caps any single argv entry at 32 × PAGE_SIZE = 131072 bytes.
+// We reserve a little headroom for other argv entries on the same line.
+const ARGV_PROMPT_LIMIT = 120_000;
+
+function assertPromptFitsArgv(prompt: string): void {
+  const size = Buffer.byteLength(prompt, 'utf8');
+  if (size > ARGV_PROMPT_LIMIT) {
+    throw new Error(
+      `opencode prompt is ${size} bytes, exceeds ${ARGV_PROMPT_LIMIT} byte argv cap. ` +
+      `Upstream opencode does not accept prompts on stdin yet ` +
+      `(https://github.com/anomalyco/opencode/issues/18659).`,
+    );
+  }
+}
 
 const adapter: AgentAdapter = {
   name: 'opencode',
@@ -78,6 +99,7 @@ const adapter: AgentAdapter = {
     // `stdio: ['ignore', 'pipe', 'pipe']`: opencode blocks reading stdin
     // when a writable pipe is inherited (zx's default). Close the handle
     // so opencode sees EOF immediately and proceeds.
+    assertPromptFitsArgv(opts.prompt);
     const stderrFd = openSync(opts.stderrPath, 'w');
     try {
       const proc = $({
@@ -106,26 +128,25 @@ const adapter: AgentAdapter = {
     const fullPrompt = opts?.systemPrompt
       ? `<system-instructions>${opts.systemPrompt}</system-instructions>\n\n${prompt}`
       : prompt;
+    assertPromptFitsArgv(fullPrompt);
 
-    if (opts?.resume && opts.sessionId) {
-      const res = spawnSync(
-        'opencode', ['run', '--format', 'json', '--dangerously-skip-permissions', '--continue', '--session', opts.sessionId, '--fork', '--model', model, fullPrompt],
-        { encoding: 'utf8', maxBuffer: 50 * 1024 * 1024, timeout, stdio: ['ignore', 'pipe', 'pipe'] },
-      );
-      try {
-        const parsed = JSON.parse(res.stdout ?? '');
-        return Promise.resolve(parsed?.response ?? res.stdout ?? '');
-      } catch { return Promise.resolve(res.stdout ?? ''); }
+    const args = opts?.resume && opts.sessionId
+      ? ['run', '--format', 'json', '--dangerously-skip-permissions', '--continue', '--session', opts.sessionId, '--fork', '--model', model, fullPrompt]
+      : ['run', '--format', 'json', '--pure', '--dangerously-skip-permissions', '--model', model, fullPrompt];
+
+    const res = spawnSync('opencode', args, {
+      encoding: 'utf8', maxBuffer: 50 * 1024 * 1024, timeout, stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    if (res.error) return Promise.reject(res.error);
+    if (res.status !== 0) {
+      return Promise.reject(new Error(`opencode exited ${res.status}${res.signal ? ` (${res.signal})` : ''}\n${(res.stderr ?? '').slice(-2000)}`));
     }
-
-    const res = spawnSync(
-      'opencode', ['run', '--format', 'json', '--pure', '--dangerously-skip-permissions', '--model', model, fullPrompt],
-      { encoding: 'utf8', maxBuffer: 50 * 1024 * 1024, timeout, stdio: ['ignore', 'pipe', 'pipe'] },
-    );
     try {
       const parsed = JSON.parse(res.stdout ?? '');
       return Promise.resolve(parsed?.response ?? res.stdout ?? '');
-    } catch { return Promise.resolve(res.stdout ?? ''); }
+    } catch {
+      return Promise.resolve(res.stdout ?? '');
+    }
   },
 };
 

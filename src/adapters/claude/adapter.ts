@@ -12,10 +12,10 @@
  * - `callLLM` supports single-shot and resume (fork-session) modes.
  */
 import { $, fs } from 'zx';
-import { spawnSync } from 'node:child_process';
 import { openSync, closeSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import type { AgentAdapter } from '../../core/types.js';
+import { spawnWithStdin } from '../../core/process.js';
 import { discoverClaudeMcpStack } from './discover-mcp.js';
 import { parseClaudeTranscript } from './parse-transcript.js';
 
@@ -71,6 +71,7 @@ const adapter: AgentAdapter = {
     // OS-level redirect stderr → stderrPath. Skips zx's buffer (no
     // maxBuffer risk on chatty runs) and is streamable from disk during
     // the run for debugging.
+    // Prompt piped via stdin (not argv) — see core/process.ts for why.
     const stderrFd = openSync(opts.stderrPath, 'w');
     try {
       const proc = $({
@@ -78,9 +79,10 @@ const adapter: AgentAdapter = {
         env: opts.env,
         timeout: '30m',
         nothrow: true,
-        stdio: ['ignore', 'pipe', stderrFd],
+        stdio: ['pipe', 'pipe', stderrFd],
+        input: opts.prompt,
         ...(opts.signal ? { signal: opts.signal } : {}),
-      })`claude ${mcpArgs} --settings ${settings} --permission-mode=bypassPermissions --output-format=stream-json --verbose -p ${opts.prompt}`;
+      })`claude ${mcpArgs} --settings ${settings} --permission-mode=bypassPermissions --output-format=stream-json --verbose -p`;
       const result = await proc;
       await fs.writeFile(opts.transcriptPath, result.stdout ?? '');
     } finally {
@@ -98,39 +100,29 @@ const adapter: AgentAdapter = {
       hooks: { PreToolUse: [{ matcher: '', hooks: [{ type: 'command', command: 'exit 2' }] }] },
     });
 
-    const spawnOpts: Parameters<typeof spawnSync>[2] = {
-      encoding: 'utf8',
-      maxBuffer: 50 * 1024 * 1024,
-      timeout,
-      stdio: ['ignore', 'pipe', 'pipe'],
-      cwd: opts?.cwd,
-    };
-
-    if (opts?.resume && opts.sessionId) {
-      const args = [
-        '-p', prompt,
-        '--resume', opts.sessionId,
-        '--fork-session',
-        '--settings', denyAllTools,
-        '--strict-mcp-config',
-        '--mcp-config', '{"mcpServers":{}}',
-      ];
-      if (opts.systemPrompt) args.push('--append-system-prompt', opts.systemPrompt);
-      if (opts.model) args.push('--model', opts.model);
-      const res = spawnSync('claude', args, spawnOpts);
-      return Promise.resolve(String(res.stdout ?? ''));
-    }
-
-    const args = [
-      '-p', prompt,
-      '--settings', denyAllTools,
-      '--strict-mcp-config',
-      '--mcp-config', '{"mcpServers":{}}',
-    ];
+    // Prompt is piped via stdin, NOT argv: Linux's execve caps any single
+    // argv entry at 128KB (MAX_ARG_STRLEN). Large grader prompts (full tool
+    // calls, transcripts) blow past that — the child fails with E2BIG and
+    // spawnSync returns silently with empty stdout. stdin has no such cap.
+    const args = opts?.resume && opts.sessionId
+      ? [
+          '-p',
+          '--resume', opts.sessionId,
+          '--fork-session',
+          '--settings', denyAllTools,
+          '--strict-mcp-config',
+          '--mcp-config', '{"mcpServers":{}}',
+        ]
+      : [
+          '-p',
+          '--settings', denyAllTools,
+          '--strict-mcp-config',
+          '--mcp-config', '{"mcpServers":{}}',
+        ];
     if (opts?.systemPrompt) args.push('--append-system-prompt', opts.systemPrompt);
     if (opts?.model) args.push('--model', opts.model);
-    const res = spawnSync('claude', args, spawnOpts);
-    return Promise.resolve(String(res.stdout ?? ''));
+
+    return spawnWithStdin('claude', args, prompt, { timeout, cwd: opts?.cwd });
   },
 };
 

@@ -22,12 +22,12 @@
  * in CODEX_HOME, so the same directory must be used for the resume.
  */
 import { $, fs } from 'zx';
-import { spawnSync } from 'node:child_process';
 import { openSync, closeSync } from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import { fileURLToPath } from 'node:url';
 import type { AgentAdapter, McpServerDef } from '../../core/types.js';
+import { spawnWithStdin } from '../../core/process.js';
 import { discoverCodexMcpStack } from './discover-mcp.js';
 import { parseCodexTranscript } from './parse-transcript.js';
 
@@ -52,6 +52,8 @@ const adapter: AgentAdapter = {
 
     const modelArgs = DEFAULT_MODEL ? ['--model', DEFAULT_MODEL] : [];
 
+    // Prompt piped via stdin (not argv) — see core/process.ts for why.
+    // Codex reads the prompt from stdin when no positional prompt is given.
     const stderrFd = openSync(opts.stderrPath, 'w');
     try {
       const result = await $({
@@ -65,9 +67,10 @@ const adapter: AgentAdapter = {
         },
         timeout: '30m',
         nothrow: true,
-        stdio: ['ignore', 'pipe', stderrFd],
+        stdio: ['pipe', 'pipe', stderrFd],
+        input: opts.prompt,
         ...(opts.signal ? { signal: opts.signal } : {}),
-      })`codex exec --json --skip-git-repo-check --dangerously-bypass-approvals-and-sandbox ${modelArgs} -C ${opts.runDir} ${opts.prompt}`;
+      })`codex exec --json --skip-git-repo-check --dangerously-bypass-approvals-and-sandbox ${modelArgs} -C ${opts.runDir}`;
 
       await fs.writeFile(opts.transcriptPath, result.stdout ?? '');
     } finally {
@@ -80,38 +83,24 @@ const adapter: AgentAdapter = {
     return result;
   },
 
-  callLLM(prompt, opts) {
+  async callLLM(prompt, opts) {
     const timeout = opts?.timeout ?? 240_000;
+    const env = { ...process.env, OPENAI_API_KEY: process.env.OPENAI_API_KEY ?? 'unused' };
 
-    if (opts?.resume && opts.sessionId) {
-      const args = ['exec', 'resume', opts.sessionId, '--json', '--skip-git-repo-check', '--sandbox', 'read-only'];
-      if (opts.systemPrompt) args.push('--config', `developer_instructions="${opts.systemPrompt}"`);
-      if (opts.model) args.push('--model', opts.model);
-      args.push(prompt);
-      const res = spawnSync('codex', args, {
-        encoding: 'utf8', maxBuffer: 50 * 1024 * 1024, timeout,
-        stdio: ['ignore', 'pipe', 'pipe'],
-        env: { ...process.env, OPENAI_API_KEY: process.env.OPENAI_API_KEY ?? 'unused' },
-      });
-      try {
-        const parsed = JSON.parse(res.stdout ?? '');
-        return Promise.resolve(parsed?.items?.find((i: any) => i.type === 'message')?.content?.[0]?.text ?? '');
-      } catch { return Promise.resolve(res.stdout ?? ''); }
-    }
-
-    const args = ['exec', '--json', '--skip-git-repo-check', '--sandbox', 'read-only', '--ignore-user-config'];
+    // Prompt piped via stdin (not argv) — see core/process.ts for why.
+    const args = opts?.resume && opts.sessionId
+      ? ['exec', 'resume', opts.sessionId, '--json', '--skip-git-repo-check', '--sandbox', 'read-only']
+      : ['exec', '--json', '--skip-git-repo-check', '--sandbox', 'read-only', '--ignore-user-config'];
     if (opts?.systemPrompt) args.push('--config', `developer_instructions="${opts.systemPrompt}"`);
     if (opts?.model) args.push('--model', opts.model);
-    args.push(prompt);
-    const res = spawnSync('codex', args, {
-      encoding: 'utf8', maxBuffer: 50 * 1024 * 1024, timeout,
-      stdio: ['ignore', 'pipe', 'pipe'],
-      env: { ...process.env, OPENAI_API_KEY: process.env.OPENAI_API_KEY ?? 'unused' },
-    });
+
+    const stdout = await spawnWithStdin('codex', args, prompt, { timeout, env });
     try {
-      const parsed = JSON.parse(res.stdout ?? '');
-      return Promise.resolve(parsed?.items?.find((i: any) => i.type === 'message')?.content?.[0]?.text ?? '');
-    } catch { return Promise.resolve(res.stdout ?? ''); }
+      const parsed = JSON.parse(stdout);
+      return parsed?.items?.find((i: any) => i.type === 'message')?.content?.[0]?.text ?? '';
+    } catch {
+      return stdout;
+    }
   },
 };
 
