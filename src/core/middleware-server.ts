@@ -4,13 +4,24 @@
  * its context by runId; every inbound request includes the runId so the
  * server routes to the correct context.
  *
- * Endpoints (two-phase protocol for onToolCall):
+ * Endpoints:
  *
- *   POST /on-tool-use/pre   { tool, args, serverName, callId, runId }
- *   POST /on-tool-use/post  { tool, args, serverName, callId, runId, response }
- *   POST /pre-tool          { ..., runId }
- *   POST /post-tool         { ..., runId }
- *   POST /after-tool-response { tool, input, response, serverName, runId }
+ *   POST /on-tool-use/call           { tool, args, serverName, callId, runId }
+ *   POST /on-tool-use/backend-result { callId, response? | error? }
+ *   POST /pre-tool                   (native tools: hookType=before)
+ *   POST /post-tool                  (native tools: hookType=after)
+ *   POST /after-tool-response        (MCP tools, fire-and-forget observer)
+ *
+ * Single-fire MCP protocol. Each middleware's `onToolCall` body runs exactly
+ * once per tool call. When the Koa-style chain descends to the backend,
+ * `baseHandler` suspends on a pending promise; the server responds
+ * `need-backend` and stashes the resolvers keyed by callId. The wrapper runs
+ * the backend and POSTs `/backend-result`, which resolves the stashed promise,
+ * unwinds the chain, and returns the final response.
+ *
+ * If middleware short-circuits (returns a CallToolResult without calling
+ * handler), the chain never descends and `/on-tool-use/call` responds
+ * `{type:'final', response}` directly — no backend round-trip.
  */
 import http from 'node:http';
 import { appendFileSync } from 'node:fs';
@@ -31,6 +42,20 @@ function wrapMiddlewareError(
 ): Error {
   const original = err instanceof Error ? err : new Error(String(err));
   return new Error(`middleware ${middlewareName}.${phase} threw: ${original.message}`, { cause: original });
+}
+
+function errorResult(message: string): CallToolResult {
+  return {
+    content: [{ type: 'text' as const, text: message }],
+    isError: true,
+  };
+}
+
+function deferred<T>(): { promise: Promise<T>; resolve: (v: T) => void; reject: (e: Error) => void } {
+  let resolve!: (v: T) => void;
+  let reject!: (e: Error) => void;
+  const promise = new Promise<T>((res, rej) => { resolve = res; reject = rej; });
+  return { promise, resolve, reject };
 }
 
 export type RunContext = {
@@ -55,6 +80,12 @@ const EMPTY_CTX: RunContext = {
   runId: '',
 };
 
+type PendingMcp = {
+  resolveBackend: (v: CallToolResult) => void;
+  rejectBackend: (e: Error) => void;
+  chainPromise: Promise<CallToolResult>;
+};
+
 export async function startMiddlewareServer(
   middleware: readonly Middleware[],
 ): Promise<MiddlewareServer> {
@@ -62,6 +93,7 @@ export async function startMiddlewareServer(
   const middlewareWithAfter = middleware.filter((h) => h.afterToolCall);
 
   const runs = new Map<string, RunContext>();
+  const pendingMcp = new Map<string, PendingMcp>();
 
   function getCtx(runId: string | undefined): RunContext {
     if (runId && runs.has(runId)) return runs.get(runId)!;
@@ -70,89 +102,155 @@ export async function startMiddlewareServer(
 
   const noop = () => {};
 
-  const NEEDS_BACKEND = Symbol('needs_backend');
+  // ──────────────────────────── Koa-style MCP chain
 
-  async function handlePreCall(body: {
-    tool: string;
-    args: unknown;
-    serverName: string;
-    callId: string;
-    runId?: string;
-  }): Promise<{ action: 'proceed' } | { action: 'respond'; response: CallToolResult }> {
-    if (middlewareWithOnTool.length === 0) return { action: 'proceed' };
-    const ctx = getCtx(body.runId);
-
-    for (const mw of middlewareWithOnTool) {
+  /**
+   * Runs the `onToolCall` chain Koa-style. Each middleware runs exactly once.
+   * Calling `handler(args)` descends to the next middleware (or `baseHandler`
+   * at the bottom). Returning a CallToolResult either short-circuits (if
+   * handler wasn't called) or transforms the response (if it was). Returning
+   * undefined after calling handler passes the handler's result through
+   * unchanged; returning undefined without calling handler delegates to the
+   * next middleware as if this one weren't installed.
+   */
+  async function runMcpChain(
+    chain: readonly Middleware[],
+    baseHandler: (args: unknown) => Promise<CallToolResult>,
+    ctx: {
+      server: string;
+      tool: string;
+      evalName: string;
+      config: Readonly<Config>;
+      abort: (reason?: unknown) => void;
+    },
+    input: unknown,
+  ): Promise<CallToolResult> {
+    let idx = 0;
+    async function next(args: unknown): Promise<CallToolResult> {
+      if (idx >= chain.length) return baseHandler(args);
+      const mw = chain[idx++];
       let handlerWasCalled = false;
-      const handler = async (_args: unknown) => {
+      let handlerResult: CallToolResult | undefined;
+      const handler = async (a: unknown): Promise<CallToolResult> => {
+        if (handlerWasCalled) throw new Error(`${mw.name}.onToolCall called handler twice`);
         handlerWasCalled = true;
-        return NEEDS_BACKEND as unknown as CallToolResult;
+        handlerResult = await next(a);
+        return handlerResult;
       };
-
       try {
         const result = await mw.onToolCall!({
-          server: body.serverName,
-          tool: body.tool,
-          input: body.args,
+          server: ctx.server,
+          tool: ctx.tool,
+          input: args,
           handler,
           evalName: ctx.evalName,
           config: ctx.config,
-          abort: ctx.abort ?? noop,
+          abort: ctx.abort,
         });
-
-        if (handlerWasCalled) return { action: 'proceed' };
-        if (result !== undefined) return { action: 'respond', response: result };
+        if (result !== undefined) return result;
+        if (handlerWasCalled) return handlerResult!;
+        return next(args);
       } catch (e) {
-        ctx.abort?.(wrapMiddlewareError(mw.name, 'onToolCall', e));
-        return {
-          action: 'respond',
-          response: {
-            content: [{ type: 'text' as const, text: `[${mw.name} failed: ${(e as Error).message}]` }],
-            isError: true,
-          },
-        };
+        ctx.abort(wrapMiddlewareError(mw.name, 'onToolCall', e));
+        return errorResult(`[${mw.name} failed: ${(e as Error).message}]`);
       }
     }
-
-    return { action: 'proceed' };
+    return next(input);
   }
 
-  async function handlePostCall(body: {
+  async function handleCall(body: {
     tool: string;
     args: unknown;
     serverName: string;
     callId: string;
     runId?: string;
-    response: CallToolResult;
-  }): Promise<{ response: CallToolResult }> {
-    if (middlewareWithOnTool.length === 0) return { response: body.response };
+  }): Promise<
+    | { type: 'final'; response: CallToolResult }
+    | { type: 'need-backend'; args: unknown }
+  > {
     const ctx = getCtx(body.runId);
-    let currentResponse = body.response;
 
-    for (const mw of middlewareWithOnTool) {
-      const handler = async (_args: unknown): Promise<CallToolResult> => currentResponse;
+    // `argsReady` fires when the chain descends to baseHandler (the args it
+    // passed are what the backend should be called with — middleware may have
+    // mutated them). `backend` is the promise baseHandler awaits; it resolves
+    // later when /backend-result is POSTed back.
+    const argsReady = deferred<unknown>();
+    const backend = deferred<CallToolResult>();
 
-      try {
-        const result = await mw.onToolCall!({
-          server: body.serverName,
-          tool: body.tool,
-          input: body.args,
-          handler,
-          evalName: ctx.evalName,
-          config: ctx.config,
-          abort: ctx.abort ?? noop,
-        });
-        if (result !== undefined) currentResponse = result;
-      } catch (e) {
-        ctx.abort?.(wrapMiddlewareError(mw.name, 'onToolCall', e));
-        currentResponse = {
-          content: [{ type: 'text' as const, text: `[${mw.name} failed: ${(e as Error).message}]` }],
-          isError: true,
-        };
-      }
+    const baseHandler = async (args: unknown): Promise<CallToolResult> => {
+      argsReady.resolve(args);
+      return backend.promise;
+    };
+
+    const chainPromise = runMcpChain(
+      middlewareWithOnTool,
+      baseHandler,
+      {
+        server: body.serverName,
+        tool: body.tool,
+        evalName: ctx.evalName,
+        config: ctx.config,
+        abort: ctx.abort ?? noop,
+      },
+      body.args,
+    );
+
+    // Race chain-complete (short-circuit) vs need-backend (descended).
+    // Wrap chainPromise to convert rejections into a result — otherwise
+    // Promise.race propagates the rejection as an exception.
+    const outcome = await Promise.race([
+      chainPromise.then(
+        (result) => ({ kind: 'complete' as const, result }),
+        (error) => ({ kind: 'error' as const, error: error as unknown }),
+      ),
+      argsReady.promise.then((args) => ({ kind: 'need-backend' as const, args })),
+    ]);
+
+    if (outcome.kind === 'complete') {
+      return { type: 'final', response: outcome.result };
+    }
+    if (outcome.kind === 'error') {
+      const err = outcome.error instanceof Error ? outcome.error : new Error(String(outcome.error));
+      ctx.abort?.(err);
+      return { type: 'final', response: errorResult(err.message) };
+    }
+    // need-backend: chain is paused at `await backend.promise`. Stash the
+    // resolvers so /backend-result can wake it, and return the args the
+    // chain descended with (possibly middleware-mutated).
+    pendingMcp.set(body.callId, {
+      resolveBackend: backend.resolve,
+      rejectBackend: backend.reject,
+      chainPromise,
+    });
+    return { type: 'need-backend', args: outcome.args };
+  }
+
+  async function handleBackendResult(body: {
+    callId: string;
+    response?: CallToolResult;
+    error?: string;
+  }): Promise<{ type: 'final'; response: CallToolResult }> {
+    const state = pendingMcp.get(body.callId);
+    if (!state) {
+      return { type: 'final', response: errorResult(`unknown callId ${body.callId}`) };
+    }
+    pendingMcp.delete(body.callId);
+
+    if (body.error !== undefined) {
+      state.rejectBackend(new Error(body.error));
+    } else if (body.response !== undefined) {
+      state.resolveBackend(body.response);
+    } else {
+      state.rejectBackend(new Error('backend-result without response or error'));
     }
 
-    return { response: currentResponse };
+    try {
+      const result = await state.chainPromise;
+      return { type: 'final', response: result };
+    } catch (e) {
+      const err = e instanceof Error ? e : new Error(String(e));
+      return { type: 'final', response: errorResult(err.message) };
+    }
   }
 
   // ──────────────────────────── Native tool endpoints (/pre-tool, /post-tool)
@@ -183,10 +281,10 @@ export async function startMiddlewareServer(
     const { tool, input } = parseNativePayload(body);
     if (!tool || middlewareWithOnTool.length === 0) return { block: false };
 
-    // Skip MCP tools — the wrapper's /on-tool-use/pre already ran the
-    // onToolCall chain with the canonical short name + server. Running here
-    // too would fire every onToolCall middleware twice per MCP call (once
-    // as `native`, once as the real server).
+    // Skip MCP tools — /on-tool-use/call already ran the onToolCall chain
+    // with the canonical short name + server. Running here too would fire
+    // every onToolCall middleware twice per MCP call (once as `native`,
+    // once as the real server).
     if (tool.startsWith('mcp__')) return { block: false };
 
     const ctx = getCtx(body.runId);
@@ -294,12 +392,12 @@ export async function startMiddlewareServer(
     }
 
     let out: unknown;
-    if (req.url === '/on-tool-use/pre') {
-      out = await handlePreCall(body);
-    } else if (req.url === '/on-tool-use/post') {
-      out = await handlePostCall(body);
+    if (req.url === '/on-tool-use/call') {
+      out = await handleCall(body);
+    } else if (req.url === '/on-tool-use/backend-result') {
+      out = await handleBackendResult(body);
     } else if (req.url === '/pre-tool') {
-      out = handlePreTool(body);
+      out = await handlePreTool(body);
     } else if (req.url === '/post-tool') {
       out = await handlePostTool(body);
     } else if (req.url === '/after-tool-response') {
@@ -322,7 +420,15 @@ export async function startMiddlewareServer(
         port: addr.port,
         registerRun(ctx) { runs.set(ctx.runId, ctx); },
         unregisterRun(runId) { runs.delete(runId); },
-        close: () => new Promise<void>((r) => server.close(() => r())),
+        close: () => new Promise<void>((r) => {
+          // Reject any outstanding suspended chains so the associated
+          // /backend-result handlers unwind instead of hanging forever.
+          for (const state of pendingMcp.values()) {
+            state.rejectBackend(new Error('middleware server closed'));
+          }
+          pendingMcp.clear();
+          server.close(() => r());
+        }),
       });
     });
   });

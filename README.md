@@ -29,7 +29,7 @@ built to validate the abstraction layer and may have rough edges.
 
 ```ts
 import { startRunner, claudeAdapter } from 'e2eval';
-import { myGrader } from './middleware/my-grader.ts';
+import { myGrader } from './middleware/my-grader.js';
 
 const runner = await startRunner({
   adapter: claudeAdapter,
@@ -56,9 +56,23 @@ implement different lifecycle methods.
 | Phase           | When                    | Use case                                               |
 | --------------- | ----------------------- | ------------------------------------------------------ |
 | `beforeEval`    | Before the agent runs   | Modify the prompt                                      |
-| `onToolCall`    | Before a tool executes  | Block, replace, or scrub tool calls                    |
+| `onToolCall`    | Around a tool call      | Block, replace, or scrub tool calls                    |
 | `afterToolCall` | After a tool executes   | Observe results you can't control (native tools, etc.) |
 | `afterEval`     | After the agent answers | Grade the answer, emit scores                          |
+
+`onToolCall` wraps the tool call Koa-style: call `await handler(input)` to
+run the backend (and any inner middleware) and inspect/transform the
+response, or return a `CallToolResult` without calling `handler` to
+short-circuit. For native tools (Bash, Read, etc.) `handler` is
+`undefined` — middleware can only block, not transform. Multiple
+middleware nest: the first wraps the second wraps the backend.
+
+Every context exposes `ctx.abort(reason)` — any phase can kill the run
+(rejects `runner.run()` with `reason`). If a middleware throws, the error
+propagates the same way: the run fails loudly instead of being silently
+swallowed. `afterEval` also receives `ctx.stderrPath` pointing at the
+agent process's full stderr on disk, for graders that want to detect
+OOMs, panics, or rate-limit retries.
 
 ```ts
 import type { Middleware } from 'e2eval';
@@ -130,9 +144,9 @@ const runner = await startRunner({
 });
 ```
 
-The wrapper intercepts every `tools/call`, runs `onToolCall` middleware
-before/after the backend, and writes a structured tool log for every
-request/response pair.
+The wrapper intercepts every `tools/call`, runs the `onToolCall`
+middleware chain around the backend call, and writes a structured tool
+log for every request/response pair.
 
 ## Adapters
 

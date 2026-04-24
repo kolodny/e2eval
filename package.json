@@ -1,6 +1,6 @@
 {
   "name": "e2eval",
-  "version": "0.0.7",
+  "version": "0.0.8",
   "description": "Middleware-powered eval framework for real-tool agents. Scrub source evidence from MCP tool results before the agent sees it.",
   "type": "module",
   "main": "./dist/index.js",

@@ -156,12 +156,13 @@ const { connect } = await mcpMiddleware({
       input: originalRequest.params.arguments ?? {},
     });
 
-    // Two-phase middleware protocol:
-    //   1. Pre-call: middleware inspects tool+args, may short-circuit (skip backend).
-    //   2. If proceed: call backend, then post-call: middleware inspects/modifies response.
+    // Single-fire middleware protocol: the server runs the Koa-style chain
+    // once, either short-circuits with a final response or asks us to run
+    // the backend with the (possibly middleware-mutated) args and echoes
+    // the result back for the chain to unwind and transform.
     let result: CallToolResult;
     if (PLUGIN_SERVER) {
-      const pre = await postJson(`${PLUGIN_SERVER}/on-tool-use/pre`, {
+      const call = await postJson(`${PLUGIN_SERVER}/on-tool-use/call`, {
         tool,
         args: originalRequest.params.arguments,
         serverName,
@@ -169,19 +170,40 @@ const { connect } = await mcpMiddleware({
         runId: RUN_ID,
       });
 
-      if (pre.action === 'respond') {
-        result = pre.response as CallToolResult;
-      } else {
-        const backendResult = (await client.request(originalRequest, z.any(), extra)) as CallToolResult;
-        const post = await postJson(`${PLUGIN_SERVER}/on-tool-use/post`, {
-          tool,
-          args: originalRequest.params.arguments,
-          serverName,
+      if (call?.type === 'final') {
+        result = call.response as CallToolResult;
+      } else if (call?.type === 'need-backend') {
+        let backendResponse: CallToolResult | undefined;
+        let backendError: string | undefined;
+        try {
+          // Middleware may have mutated the args before calling handler(),
+          // so hit the backend with what the chain descended with.
+          const backendRequest = {
+            ...originalRequest,
+            params: {
+              ...originalRequest.params,
+              arguments: call.args as Record<string, unknown>,
+            },
+          };
+          backendResponse = (await client.request(backendRequest, z.any(), extra)) as CallToolResult;
+        } catch (e) {
+          backendError = e instanceof Error ? e.message : String(e);
+        }
+
+        const finalReply = await postJson(`${PLUGIN_SERVER}/on-tool-use/backend-result`, {
           callId,
           runId: RUN_ID,
-          response: backendResult,
+          ...(backendError !== undefined ? { error: backendError } : { response: backendResponse }),
         });
-        result = (post.response as CallToolResult) ?? backendResult;
+        result = (finalReply?.response as CallToolResult) ?? {
+          content: [{ type: 'text' as const, text: backendError ?? 'middleware server returned no response' }],
+          isError: true,
+        };
+      } else {
+        result = {
+          content: [{ type: 'text' as const, text: `unexpected middleware-server response: ${JSON.stringify(call)}` }],
+          isError: true,
+        };
       }
     } else {
       result = (await client.request(originalRequest, z.any(), extra)) as CallToolResult;

@@ -39,16 +39,30 @@ export type MiddlewareContext = {
 };
 
 /**
- * Argument to `Middleware.onToolCall`. Fires before a tool runs — both MCP
- * and native tools. Return a `CallToolResult` to short-circuit (block or
- * replace), or `undefined` to let it proceed.
+ * Argument to `Middleware.onToolCall`. Wraps a tool call Koa-style: the
+ * middleware body runs exactly once, and `await handler(input)` descends
+ * into the next middleware (or the backend at the bottom) and returns the
+ * real response.
+ *
+ *   - Return a `CallToolResult` WITHOUT calling `handler` → short-circuit
+ *     (block/replace); backend and later middleware never run.
+ *   - Call `handler`, then return a `CallToolResult` → transform the
+ *     response (scrub, redact, annotate).
+ *   - Call `handler`, then return `undefined` → pass the response through
+ *     unchanged.
+ *   - Return `undefined` without calling `handler` → delegate to the next
+ *     middleware as if this one weren't installed.
+ *
+ * For native tools (Bash, Read, etc.) `handler` is `undefined` —
+ * middleware can block by returning a `CallToolResult`, but cannot observe
+ * or transform the response. Use `afterToolCall` for native-tool results.
  */
 export type OnToolCallArg = MiddlewareContext & {
   /** MCP server name, or 'native' for agent-native tools (Bash, Read, etc.). */
   server: string;
   tool: string;
   input: unknown;
-  /** Call the MCP backend (MCP tools only, undefined for native). */
+  /** Descend into the next middleware / backend. MCP tools only — undefined for native. */
   handler?: (args: unknown) => Promise<CallToolResult>;
 };
 
@@ -124,7 +138,8 @@ export type AfterEvalResult = {
 /**
  * A middleware can participate in four lifecycle phases:
  *   1. `beforeEval` — pre-agent: modify the prompt
- *   2. `onToolCall` — before a tool runs (MCP or native): can block or replace
+ *   2. `onToolCall` — around a tool call (MCP or native): block, replace, or
+ *      (MCP only) transform the response via `handler(input)`
  *   3. `afterToolCall` — after a tool ran: observe and flag
  *   4. `afterEval` — post-agent grading/analysis: emit scores
  */
