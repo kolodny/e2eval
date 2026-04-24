@@ -56,6 +56,7 @@ export type OnToolCallArg = MiddlewareContext & {
 export type AfterToolCallArg = MiddlewareContext & {
   /** MCP server name, or 'native' for non-MCP tools (Bash, Read, etc.). */
   server: string;
+  /** Short tool name — MCP tools surface as their canonical name (e.g. `rag-slack-prod`), not the agent-exposed form (`mcp__core-tools__rag-slack-prod`). */
   tool: string;
   input: unknown;
   response: string;

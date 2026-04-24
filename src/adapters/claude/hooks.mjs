@@ -56,9 +56,12 @@ async function main() {
       process.stderr.write(result.message + '\n');
       process.exit(2);
     }
-  } else {
+  } else if (hookType === 'PostToolUse') {
     await post('/post-tool', payload);
   }
+  // Other hook types (Notification, SessionStart, UserPromptSubmit,
+  // SubagentStop, PreCompact, SessionEnd, etc.) are no-ops — they're not
+  // tool events.
 }
 
 main().catch((e) => {

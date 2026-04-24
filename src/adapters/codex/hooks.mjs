@@ -61,9 +61,11 @@ async function main() {
       process.stderr.write(result.message + '\n');
       process.exit(2);
     }
-  } else {
+  } else if (hookEvent === 'PostToolUse') {
     await post('/post-tool', payload);
   }
+  // Other codex hook events (SessionStart, PermissionRequest,
+  // UserPromptSubmit, Stop) are no-ops.
 }
 
 main().catch((e) => {

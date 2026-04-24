@@ -173,6 +173,12 @@ export async function startMiddlewareServer(
     const { tool, input } = parseNativePayload(body);
     if (!tool || middlewareWithOnTool.length === 0) return { block: false };
 
+    // Skip MCP tools — the wrapper's /on-tool-use/pre already ran the
+    // onToolCall chain with the canonical short name + server. Running here
+    // too would fire every onToolCall middleware twice per MCP call (once
+    // as `native`, once as the real server).
+    if (tool.startsWith('mcp__')) return { block: false };
+
     const ctx = getCtx(body.runId);
     for (const mw of middlewareWithOnTool) {
       try {
@@ -201,6 +207,13 @@ export async function startMiddlewareServer(
   async function handlePostTool(body: any): Promise<{ ok: true }> {
     const { tool, input, response } = parseNativePayload(body);
     if (!tool) return { ok: true };
+
+    // Skip MCP tools — the wrapper already wrote its own request/result
+    // entries to the tool log and fired afterToolCall with the canonical
+    // server name. Running here too would produce duplicate tool-log rows
+    // (one as `native`, one as the real server) and double-fire every
+    // afterToolCall middleware.
+    if (tool.startsWith('mcp__')) return { ok: true };
 
     const ctx = getCtx(body.runId);
     const content = stringifyResponse(response);
