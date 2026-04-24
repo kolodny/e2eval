@@ -223,6 +223,14 @@ export type McpServerDef = {
   command?: string;
   args?: string[];
   env?: Record<string, string>;
+  /**
+   * Working directory for the backend process. When an entry comes from a
+   * project-local config file (e.g. `.mcp.json`, `opencode.jsonc`) with
+   * relative paths in `command`/`args`, this pins resolution to the
+   * directory the config file lived in — otherwise e2eval's cwd pivot
+   * (`.eval_runs/run_<id>`) would break those relative paths.
+   */
+  cwd?: string;
   url?: string;
   type?: string;
 };

@@ -48,12 +48,18 @@ function wrap(
     };
   }
   if (server.command) {
+    // `cwd` is forwarded as a wrapper CLI flag rather than set on the
+    // wrapper's own spawn, because the wrapper (node + server.js) doesn't
+    // care about cwd — only the backend process it spawns via
+    // StdioClientTransport does. server.ts parses `--cwd` and hands it to
+    // the transport so relative `command`/`args` resolve correctly.
     return {
       command: NODE,
       args: [
         SERVER,
         '--type=stdio',
         `--name=${name}`,
+        ...(server.cwd ? [`--cwd=${server.cwd}`] : []),
         '--',
         server.command,
         ...(server.args ?? []),

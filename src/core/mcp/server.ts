@@ -55,15 +55,27 @@ function postJson(urlStr: string, body: unknown): Promise<any> {
 const program = new Command()
   .requiredOption('--type <type>', 'stdio | http')
   .requiredOption('--name <name>', 'server identifier included in log entries')
+  .option('--cwd <cwd>', 'working directory for the stdio backend process')
   .argument('<target>', 'command (stdio) or URL (http)')
   .argument('[args...]', 'extra args for stdio command')
   .parse();
 
-const { type, name: serverName } = program.opts<{ type: string; name: string }>();
+const { type, name: serverName, cwd: backendCwd } = program.opts<{
+  type: string;
+  name: string;
+  cwd?: string;
+}>();
 const [target, ...args] = program.args;
 
 const makeTransport = () => {
-  if (type === 'stdio') return new Stdio({ command: target, args });
+  if (type === 'stdio') {
+    // Pinning `cwd` on the transport (rather than on the wrapper process
+    // itself) keeps the wrapper agnostic of where the backend expects to
+    // run. The MCP SDK's StdioServerParameters supports `cwd` but doesn't
+    // default it — without this, node's spawn inherits e2eval's scratch
+    // dir and relative paths from .mcp.json-style configs break.
+    return new Stdio({ command: target, args, ...(backendCwd ? { cwd: backendCwd } : {}) });
+  }
   if (type === 'http') return new HTTP(new URL(target));
   throw new Error(`unknown --type=${type}`);
 };

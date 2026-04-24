@@ -110,7 +110,18 @@ export function discoverClaudeMcpStack(cwd: string = process.cwd()): {
     ...(userSettings.mcpServers ?? {}),
   };
   for (const s of projectSettings) Object.assign(mcpServers, s.mcpServers ?? {});
-  for (const { servers } of walkMcpJson(cwd)) Object.assign(mcpServers, servers);
+  // Stamp each `.mcp.json` entry's source dir as its `cwd` (unless the
+  // entry already specifies one). Needed because e2eval pivots cwd to a
+  // scratch dir before spawning the agent, which would otherwise break
+  // relative paths in `command`/`args`.
+  for (const { dir, servers } of walkMcpJson(cwd)) {
+    for (const [name, def] of Object.entries(servers)) {
+      if (def && typeof def === 'object' && (def as any).command && !(def as any).cwd) {
+        (def as any).cwd = dir;
+      }
+      mcpServers[name] = def;
+    }
+  }
   Object.assign(mcpServers, homeProject.mcpServers ?? {});
 
   // Stamp settings env onto each server that doesn't already have its own

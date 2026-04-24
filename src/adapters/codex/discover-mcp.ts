@@ -37,10 +37,17 @@ export function discoverCodexMcpStack(cwd: string = process.cwd()): {
   }
 
   // Codex also reads the project-local .mcp.json (cwd only, no walk-up).
-  // Project entries override TOML entries on name conflict.
+  // Project entries override TOML entries on name conflict. Each one gets
+  // `cwd` stamped to `cwd` (the dir the file lived in) so relative paths
+  // survive e2eval's cwd pivot.
   const projectMcp = readJson(path.join(cwd, '.mcp.json'));
   if (projectMcp?.mcpServers) {
-    Object.assign(out, projectMcp.mcpServers);
+    for (const [name, def] of Object.entries(projectMcp.mcpServers)) {
+      if (def && typeof def === 'object' && (def as any).command && !(def as any).cwd) {
+        (def as any).cwd = cwd;
+      }
+      out[name] = def;
+    }
   }
 
   return { mcpServers: out };
