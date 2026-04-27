@@ -1,20 +1,22 @@
 /**
- * Parse opencode `--format json` JSONL into a NormalizedTranscript.
+ * Parse OpenCode's `--format json` JSONL output into a NormalizedTranscript.
  *
- * Event shape (per line):
- *   {type:'step_start', sessionID, part:{...}}
- *   {type:'text',       sessionID, part:{type:'text', text:'...'}}
- *   {type:'step_finish', sessionID, part:{...}}
+ * Schema (one JSON object per line):
+ *   {type:'step_start', sessionID, part:{messageID, ...}}
+ *   {type:'text', sessionID, part:{text, ...}}
+ *   {type:'tool', sessionID, part:{...}}        — tool calls; we ignore for answer
+ *   {type:'step_finish', sessionID, part:{reason, tokens, ...}}
  *
- * Opencode may stream multiple `text` parts for a single answer, so we
- * concatenate them.
+ * Different opencode versions have emitted slightly different envelopes;
+ * we accept any line with a `text` field nested under `part` and pull
+ * the LAST one in the stream as the final answer. `sessionID` from any
+ * line populates the session id.
  */
-import { readFileSync } from 'node:fs';
 import type { NormalizedTranscript } from '../../core/types.js';
 
-export function parseOpencodeTranscript(jsonlPath: string): NormalizedTranscript {
-  const lines = readFileSync(jsonlPath, 'utf8').split('\n').filter(Boolean);
-  const textChunks: string[] = [];
+export function parseOpencodeTranscript(streamJson: string): NormalizedTranscript {
+  const lines = streamJson.split('\n').filter(Boolean);
+  let answer = '';
   let sessionId: string | undefined;
 
   for (const line of lines) {
@@ -24,12 +26,20 @@ export function parseOpencodeTranscript(jsonlPath: string): NormalizedTranscript
     } catch {
       continue;
     }
-    if (!sessionId && entry.sessionID) sessionId = entry.sessionID;
-    const part = entry.part;
-    if (part?.type === 'text' && typeof part.text === 'string') {
-      textChunks.push(part.text);
+
+    if (typeof entry.sessionID === 'string' && !sessionId) {
+      sessionId = entry.sessionID;
+    }
+
+    // Concatenate all text parts in source order — opencode emits one
+    // `text` event per chunk, and the final assistant answer is the
+    // concatenation of every `text` part in the latest step. Using
+    // "last text" alone would lose multi-chunk replies.
+    const part = entry?.part;
+    if (entry?.type === 'text' && part && typeof part.text === 'string') {
+      answer = answer ? `${answer}${part.text}` : part.text;
     }
   }
 
-  return { finalAnswer: textChunks.join(''), sessionId };
+  return { answer, sessionId };
 }

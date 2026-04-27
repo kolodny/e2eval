@@ -1,81 +1,71 @@
-/** Claude Code adapter. */
-import { $, fs } from 'zx';
-import { openSync, closeSync } from 'node:fs';
-import { fileURLToPath } from 'node:url';
+/**
+ * Claude Code adapter — proxy edition.
+ *
+ * Spawns claude with stream-json output, captures stdout, parses it
+ * inline, and returns the `NormalizedTranscript`. No transcript or
+ * stderr file is written by the framework — claude maintains its own
+ * session logs under `~/.claude/projects/` for users who want to audit.
+ */
+import { $ } from 'zx';
 import type { AgentAdapter } from '../../core/types.js';
 import { spawnWithStdin } from '../../core/process.js';
-import { discoverClaudeMcpStack } from './discover-mcp.js';
 import { parseClaudeTranscript } from './parse-transcript.js';
-
-const HOOK_ADAPTER = fileURLToPath(
-  new URL('./hooks.mjs', import.meta.url),
-);
+import { startClaudeProxy } from './proxy.js';
 
 $.verbose = false;
 
+/**
+ * Inline `--settings` to override only `ANTHROPIC_BASE_URL` — the rest of
+ * the user's claude config (`apiKeyHelper`, OTEL env, hooks, effort level)
+ * keeps applying via the normal `~/.claude/settings.json` chain.
+ *
+ * Why we override BASE_URL via --settings rather than process env: claude's
+ * precedence is `--settings.env` > `~/.claude/settings.json env` > process
+ * env, so a user with `ANTHROPIC_BASE_URL` set in settings.json would
+ * otherwise win and bypass our proxy.
+ *
+ * We do NOT override `ANTHROPIC_API_KEY`: the proxy passes the auth header
+ * through to the upstream gateway / Anthropic API, so claude needs its
+ * real credentials to flow through.
+ */
+function buildSettings(proxyUrl: string): string {
+  return JSON.stringify({
+    env: { ANTHROPIC_BASE_URL: proxyUrl },
+  });
+}
+
 const adapter: AgentAdapter = {
   name: 'claude',
-  supportsMcp: true,
 
-  discoverMcpStack(cwd) {
-    return discoverClaudeMcpStack(cwd);
+  startProxy(opts) {
+    return startClaudeProxy(opts);
   },
 
-  async run(opts): Promise<void> {
-    // No `--strict-mcp-config`: claude layers the wrapped file over its
-    // normal discovery chain, so an eval inherits pwd `.mcp.json` entries
-    // the user has set up. Wrapped entries win on name conflict.
-    const mcpArgs = opts.mcpConfigPath
-      ? [`--mcp-config=${opts.mcpConfigPath}`]
-      : [];
-
-    const settings = JSON.stringify({
-      hooks: {
-        PreToolUse: [
-          {
-            matcher: '.*',
-            hooks: [
-              { type: 'command', command: `node ${HOOK_ADAPTER}`, timeout: 10 },
-            ],
-          },
-        ],
-        PostToolUse: [
-          {
-            matcher: '.*',
-            hooks: [
-              { type: 'command', command: `node ${HOOK_ADAPTER}`, timeout: 10 },
-            ],
-          },
-        ],
-      },
-    });
-
-    // stderr redirects OS-level (skips zx's maxBuffer); prompt goes via
-    // stdin (argv caps at 128KB — see core/process.ts).
-    const stderrFd = openSync(opts.stderrPath, 'w');
-    try {
-      const proc = $({
-        cwd: opts.runDir,
-        env: opts.env,
-        timeout: '30m',
-        nothrow: true,
-        stdio: ['pipe', 'pipe', stderrFd],
-        input: opts.prompt,
-        ...(opts.signal ? { signal: opts.signal } : {}),
-      })`claude ${mcpArgs} --settings ${settings} --permission-mode=bypassPermissions --output-format=stream-json --verbose -p`;
-      const result = await proc;
-      await fs.writeFile(opts.transcriptPath, result.stdout ?? '');
-    } finally {
-      closeSync(stderrFd);
-    }
-  },
-
-  parseTranscript(path) {
-    return parseClaudeTranscript(path);
+  async run(opts) {
+    const settings = buildSettings(opts.proxyUrl);
+    // Prompt goes through stdin (argv caps at 128KB). stderr is captured
+    // (pipe) and forwarded to our stderr — NOT inherited. If claude is
+    // ever orphaned (test cancellation, killed parent), an inherited fd
+    // would keep our outer-process stderr pipe alive, blocking node:test
+    // from exiting. With pipe+forward, the orphan dies on its next write
+    // (SIGPIPE) or just sits there harmlessly.
+    const proc = $({
+      cwd: opts.runDir,
+      env: opts.env,
+      timeout: '30m',
+      nothrow: true,
+      stdio: ['pipe', 'pipe', 'pipe'],
+      input: opts.prompt,
+      ...(opts.signal ? { signal: opts.signal } : {}),
+    })`claude --settings ${settings} --permission-mode=bypassPermissions --output-format=stream-json --verbose -p`;
+    proc.stderr?.pipe(process.stderr, { end: false });
+    const result = await proc;
+    return parseClaudeTranscript(result.stdout ?? '');
   },
 
   callLLM(prompt, opts) {
     const timeout = opts?.timeout ?? 240_000;
+    // Deny all tools so callLLM is a single-shot text generation.
     const denyAllTools = JSON.stringify({
       hooks: { PreToolUse: [{ matcher: '', hooks: [{ type: 'command', command: 'exit 2' }] }] },
     });

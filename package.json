@@ -1,7 +1,7 @@
 {
   "name": "e2eval",
-  "version": "0.0.10",
-  "description": "Middleware-powered eval framework for real-tool agents. Scrub source evidence from MCP tool results before the agent sees it.",
+  "version": "0.1.0",
+  "description": "Middleware-powered eval framework for Claude Code. Intercepts the Anthropic API to observe and scrub tool calls.",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -20,30 +20,29 @@
     "README.md"
   ],
   "scripts": {
-    "build": "tsc && node scripts/copy-hooks.mjs",
+    "build": "tsc",
     "typecheck": "tsc --noEmit",
+    "test": "E2EVAL_NO_CLEANUP=1 node --import tsx --test 'tests/**/*.test.ts'",
+    "posttest": "rm -rf .eval_runs",
     "clean": "rm -rf dist",
     "prepublishOnly": "npm run clean && npm run build"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.29.0",
-    "commander": "^14.0.3",
-    "mcp-middleware": "^0.0.1",
-    "zod": "^4.3.6",
+    "@anthropic-ai/sdk": "^0.91.1",
     "zx": "^8.3.2"
   },
   "devDependencies": {
     "@types/node": "^22.10.1",
+    "tsx": "^4.21.0",
     "typescript": "^5.7.2"
   },
   "keywords": [
     "eval",
     "agent",
-    "mcp",
     "llm",
     "claude",
-    "codex",
-    "opencode"
+    "anthropic",
+    "proxy"
   ],
   "author": "Moshe Kolodny",
   "license": "MIT",

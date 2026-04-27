@@ -1,139 +1,111 @@
 /**
- * Opencode adapter.
+ * OpenCode adapter — Anthropic provider edition.
  *
- * Writes a project-local `opencode.jsonc` into runDir with the wrapped MCP
- * map translated to opencode's `{type:'local', command:[cmd, ...args]}`
- * shape. Opencode spawns every configured MCP server at startup and has no
- * per-run override, so pwd-discovered MCPs are *not* merged in.
+ * Spawns `opencode run --format json --model <provider>/<model>` with a
+ * runtime `OPENCODE_CONFIG_CONTENT` JSON injected into the env. The
+ * config overrides the named provider's `baseURL` to point at our
+ * Anthropic proxy. OpenCode's docs document `OPENCODE_CONFIG_CONTENT`
+ * as the highest-priority config layer; opencode merges it deeply with
+ * any other config files, so we only need to specify the override.
  *
- * Prompt-size limit: `opencode run` does not accept stdin prompts
- * (https://github.com/anomalyco/opencode/issues/18659), so the prompt goes
- * through argv and hits Linux's MAX_ARG_STRLEN cap (128KB per entry). The
- * adapter throws on oversized prompts instead of letting execve fail
- * silently with E2BIG.
+ * Defaults: provider `anthropic`, model `claude-haiku-4-5`. To target a
+ * different provider name (e.g. a private gateway registered in the
+ * user's opencode config) or model, build a customised adapter:
+ *
+ *   const adapter = createOpencodeAdapter({ provider: 'my-gateway', model: '…' });
  */
-import { $, fs } from 'zx';
-import { spawnSync } from 'node:child_process';
-import { openSync, closeSync } from 'node:fs';
-import path from 'node:path';
-import { fileURLToPath } from 'node:url';
-import type { AgentAdapter, McpServerDef } from '../../core/types.js';
-import { discoverOpencodeMcpStack } from './discover-mcp.js';
+import { $ } from 'zx';
+import type { AgentAdapter } from '../../core/types.js';
+import { spawnWithStdin } from '../../core/process.js';
 import { parseOpencodeTranscript } from './parse-transcript.js';
-
-const OPENCODE_PLUGIN = fileURLToPath(
-  new URL('./hooks.mjs', import.meta.url),
-);
+import { startOpencodeProxy } from './proxy.js';
 
 $.verbose = false;
 
-const DEFAULT_MODEL = process.env.OPENCODE_MODEL ?? null;
-
-// Linux execve caps any single argv entry at 32 × PAGE_SIZE = 131072 bytes.
-// We reserve a little headroom for other argv entries on the same line.
-const ARGV_PROMPT_LIMIT = 120_000;
-
-function assertPromptFitsArgv(prompt: string): void {
-  const size = Buffer.byteLength(prompt, 'utf8');
-  if (size > ARGV_PROMPT_LIMIT) {
-    throw new Error(
-      `opencode prompt is ${size} bytes, exceeds ${ARGV_PROMPT_LIMIT} byte argv cap. ` +
-      `Upstream opencode does not accept prompts on stdin yet ` +
-      `(https://github.com/anomalyco/opencode/issues/18659).`,
-    );
-  }
-}
-
-const adapter: AgentAdapter = {
-  name: 'opencode',
-  supportsMcp: true,
-
-  discoverMcpStack(cwd) {
-    return discoverOpencodeMcpStack(cwd);
-  },
-
-  async run(opts): Promise<void> {
-    const wrappedMap: Record<string, McpServerDef> = opts.mcpConfigPath
-      ? (await fs.readJson(opts.mcpConfigPath)).mcpServers ?? {}
-      : {};
-    const mcp: Record<string, any> = {};
-    for (const [name, def] of Object.entries(wrappedMap)) {
-      if (def.url) mcp[name] = { type: 'remote', url: def.url };
-      else if (def.command) {
-        mcp[name] = {
-          type: 'local',
-          command: [def.command, ...(def.args ?? [])],
-          ...(def.env ? { environment: def.env } : {}),
-        };
-      }
-    }
-
-    // Opencode's plugin loader rejects absolute paths on some versions —
-    // copy into runDir and reference it relative-in-cwd.
-    const pluginDst = path.join(opts.runDir, 'e2eval-plugin.mjs');
-    await fs.copy(OPENCODE_PLUGIN, pluginDst);
-    await fs.writeJson(path.join(opts.runDir, 'opencode.jsonc'), {
-      $schema: 'https://opencode.ai/config.json',
-      mcp,
-      plugin: ['./e2eval-plugin.mjs'],
-    }, { spaces: 2 });
-
-    // stdio[0]='ignore': opencode blocks reading stdin when it inherits
-    // a writable pipe (zx's default); closed stdin makes it proceed.
-    assertPromptFitsArgv(opts.prompt);
-    const stderrFd = openSync(opts.stderrPath, 'w');
-    try {
-      const proc = $({
-        cwd: opts.runDir,
-        env: opts.env,
-        timeout: '30m',
-        nothrow: true,
-        stdio: ['ignore', 'pipe', stderrFd],
-        ...(opts.signal ? { signal: opts.signal } : {}),
-      })`opencode run --format json --dangerously-skip-permissions ${DEFAULT_MODEL ? ['--model', DEFAULT_MODEL] : []} ${opts.prompt}`;
-      const result = await proc;
-      await fs.writeFile(opts.transcriptPath, result.stdout ?? '');
-    } finally {
-      closeSync(stderrFd);
-    }
-  },
-
-  parseTranscript(path) {
-    const result = parseOpencodeTranscript(path);
-    return result;
-  },
-
-  async callLLM(prompt, opts) {
-    const timeout = opts?.timeout ?? 240_000;
-    const model = opts?.model ?? DEFAULT_MODEL;
-    const fullPrompt = opts?.systemPrompt
-      ? `<system-instructions>${opts.systemPrompt}</system-instructions>\n\n${prompt}`
-      : prompt;
-    assertPromptFitsArgv(fullPrompt);
-
-    const args = ['run', '--format', 'json', '--dangerously-skip-permissions'];
-    if (opts?.resume && opts.sessionId) {
-      args.push('--continue', '--session', opts.sessionId, '--fork');
-    } else {
-      args.push('--pure');
-    }
-    if (model) args.push('--model', model);
-    args.push(fullPrompt);
-
-    const res = spawnSync('opencode', args, {
-      encoding: 'utf8', maxBuffer: 50 * 1024 * 1024, timeout, stdio: ['ignore', 'pipe', 'pipe'],
-    });
-    if (res.error) throw res.error;
-    if (res.status !== 0) {
-      throw new Error(`opencode exited ${res.status}${res.signal ? ` (${res.signal})` : ''}\n${(res.stderr ?? '').slice(-2000)}`);
-    }
-    const stdout = res.stdout ?? '';
-    try {
-      return JSON.parse(stdout)?.response ?? stdout;
-    } catch {
-      return stdout;
-    }
-  },
+export type OpencodeAdapterOptions = {
+  /** Provider name to override (must exist in opencode's config or auth.json). Default `anthropic`. */
+  provider?: string;
+  /** Model id (without provider prefix). Default `claude-haiku-4-5`. */
+  model?: string;
 };
 
-export default adapter;
+const DEFAULT_PROVIDER = 'anthropic';
+const DEFAULT_MODEL = 'claude-haiku-4-5';
+
+/** Build the inline opencode config that overrides only the provider's baseURL. */
+function buildConfigContent(provider: string, baseURL: string): string {
+  return JSON.stringify({
+    $schema: 'https://opencode.ai/config.json',
+    provider: {
+      [provider]: {
+        options: {
+          baseURL,
+          // apiKey is required by some @ai-sdk/* loaders even when the
+          // upstream proxy validates auth itself. Any non-empty string works.
+          apiKey: process.env.ANTHROPIC_API_KEY ?? 'e2eval-placeholder',
+        },
+      },
+    },
+  });
+}
+
+export function createOpencodeAdapter(adapterOpts: OpencodeAdapterOptions = {}): AgentAdapter {
+  const provider = adapterOpts.provider ?? DEFAULT_PROVIDER;
+  const model = adapterOpts.model ?? DEFAULT_MODEL;
+
+  return {
+    name: 'opencode',
+
+    startProxy(opts) {
+      return startOpencodeProxy(opts);
+    },
+
+    async run(opts) {
+      // `@ai-sdk/anthropic` appends `/messages` (not `/v1/messages`) to
+      // the configured baseURL. The proxy listens on `/v1/messages`, so
+      // we hand opencode a base of `<proxyUrl>/v1` to land on the right
+      // path. Same convention claude/Anthropic SDKs use.
+      const env = {
+        ...opts.env,
+        OPENCODE_CONFIG_CONTENT: buildConfigContent(provider, `${opts.proxyUrl}/v1`),
+      };
+      // stderr piped (not inherited) — see claude/adapter.ts for why:
+      // an orphaned child holding an inherited stderr fd blocks the
+      // outer node:test process from exiting.
+      const proc = $({
+        cwd: opts.runDir,
+        env,
+        timeout: '30m',
+        nothrow: true,
+        stdio: ['pipe', 'pipe', 'pipe'],
+        input: opts.prompt,
+        ...(opts.signal ? { signal: opts.signal } : {}),
+      })`opencode run --format json --model ${`${provider}/${model}`} --dangerously-skip-permissions`;
+      proc.stderr?.pipe(process.stderr, { end: false });
+      const result = await proc;
+      return parseOpencodeTranscript(result.stdout ?? '');
+    },
+
+    callLLM(prompt, opts) {
+      const timeout = opts?.timeout ?? 240_000;
+      // Stand-alone single-shot — uses opencode `run` with no tools by
+      // setting `--agent build-no-tools` if available, otherwise just
+      // sends the prompt and returns the answer text. Resume isn't
+      // supported here yet (would need session forking).
+      const args = ['run', '--format', 'json', '--model', `${provider}/${opts?.model ?? model}`];
+      if (opts?.systemPrompt) {
+        // opencode CLI doesn't take a --system flag in `run`; the system
+        // prompt is bundled into the user message instead.
+        return spawnWithStdin('opencode', args, `${opts.systemPrompt}\n\n${prompt}`, {
+          timeout, cwd: opts?.cwd,
+        }).then((stdout) => parseOpencodeTranscript(stdout).answer);
+      }
+      return spawnWithStdin('opencode', args, prompt, {
+        timeout, cwd: opts?.cwd,
+      }).then((stdout) => parseOpencodeTranscript(stdout).answer);
+    },
+  };
+}
+
+const opencodeAdapter = createOpencodeAdapter();
+export default opencodeAdapter;
