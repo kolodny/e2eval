@@ -3,7 +3,7 @@
 [![npm version](https://img.shields.io/npm/v/e2eval.svg)](https://www.npmjs.com/package/e2eval)
 [![npm downloads](https://img.shields.io/npm/dm/e2eval.svg)](https://www.npmjs.com/package/e2eval)
 
-Eval framework for [Claude Code](https://claude.ai/code), [Opencode](https://github.com/sst/opencode),
+Eval framework for [Claude Code](https://claude.ai/code), [OpenCode](https://github.com/sst/opencode),
 and [Codex](https://github.com/openai/codex) that uses real tools against
 real data. Evals are built from actual tasks — someone asked a question
 in Slack, debugged a production issue, or traced a config problem through
@@ -208,17 +208,28 @@ in settings.json would bypass the proxy.
 ### Upstream
 
 The proxy forwards to whatever `upstream:` you pass to `startRunner`.
-If you don't pass one, it falls back to the provider's standard env
-var (`ANTHROPIC_BASE_URL` for claude/opencode, `OPENAI_BASE_URL` for
-codex) and finally to the public API. We deliberately don't read
-`~/.claude/settings.json` (or any other tool-internal config) to
-discover an upstream — that's reverse-engineering tool internals.
-Pass `upstream:` explicitly, or set the env var.
+Each adapter has its own fallback chain when you don't pass one:
+
+| Adapter            | Resolution order                                                                                                                                       |
+| ------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `claudeAdapter`    | `upstream:` → `process.env.ANTHROPIC_BASE_URL` → **hook discovery** (asks claude itself what it would resolve) → `https://api.anthropic.com`           |
+| `opencodeAdapter`  | `upstream:` → `process.env.ANTHROPIC_BASE_URL` → `https://api.anthropic.com`                                                                           |
+| `codexAdapter`     | `upstream:` → `process.env.OPENAI_BASE_URL` → `https://api.openai.com`                                                                                 |
+
+**Hook discovery** (claude only): on first proxy start with no
+`upstream:` and no env var, we run a one-shot
+`claude -p x --no-session-persistence --settings ...` whose
+`UserPromptSubmit` hook captures `$ANTHROPIC_BASE_URL` and exits
+before any API call. That gives us whatever claude itself would
+resolve from its full settings chain (managed → user → project →
+env), without us mirroring the precedence rules. ~3-4s on first call,
+cached after that. Override or skip it by passing `upstream:`
+explicitly or setting `ANTHROPIC_BASE_URL`.
 
 ```ts
 const runner = await startRunner({
   adapter: claudeAdapter,
-  upstream: 'https://my-corp-gateway.example.com',
+  upstream: 'https://my-private-gateway.example.com',
 });
 ```
 

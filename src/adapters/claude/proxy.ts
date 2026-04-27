@@ -2,25 +2,21 @@
  * Claude-specific Anthropic proxy.
  *
  * Thin wrapper around the agent-neutral `startAnthropicProxy` in
- * `src/providers/anthropic-proxy.ts`. The only claude-specific bit:
- * the redirect tool is `Bash` (capitalised — claude's native tool).
+ * `src/providers/anthropic-proxy.ts`. Claude-specific bits:
  *
- * Upstream resolution is explicit:
- *
- *   - Pass `upstream:` to `startRunner({ upstream })` for an explicit URL.
- *   - Or set `ANTHROPIC_BASE_URL` in your shell env.
- *   - Otherwise we default to `https://api.anthropic.com`.
- *
- * We deliberately don't read `~/.claude/settings.json` (or any other
- * tool-internal config) to discover an upstream — claude's settings
- * precedence chain is its own internal contract and mirroring it
- * client-side is a maintenance trap.
+ *   - Redirect tool name is `Bash` (capitalised — claude's native tool).
+ *   - When no `upstream:` is passed and `ANTHROPIC_BASE_URL` isn't in
+ *     the env, we ask claude itself what it would resolve via a
+ *     UserPromptSubmit hook trick (see `discover-upstream.ts`). That
+ *     way users with a corp gateway in `~/.claude/settings.json` don't
+ *     have to mirror it on `startRunner({ upstream })`.
  */
 import {
   startAnthropicProxy,
   type AgentProxy,
   type StartAnthropicProxyOpts,
 } from '../../providers/anthropic-proxy.js';
+import { discoverClaudeUpstream } from './discover-upstream.js';
 
 export type StartProxyOpts = Omit<StartAnthropicProxyOpts, 'redirectToolName' | 'upstreamResolver'>;
 
@@ -28,7 +24,21 @@ export function startClaudeProxy(opts: StartProxyOpts): Promise<AgentProxy> {
   return startAnthropicProxy({
     ...opts,
     redirectToolName: 'Bash',
-    // No custom resolver — startAnthropicProxy's default already does
-    // `process.env.ANTHROPIC_BASE_URL ?? https://api.anthropic.com`.
+    upstreamResolver: claudeUpstreamResolver,
   });
+}
+
+/**
+ * Resolution order:
+ *   1. `process.env.ANTHROPIC_BASE_URL`
+ *   2. Hook discovery (claude's own resolved settings — managed/user/project)
+ *   3. `https://api.anthropic.com`
+ *
+ * The explicit `upstream:` passed to `startRunner` is handled before
+ * this resolver is even called.
+ */
+async function claudeUpstreamResolver(): Promise<string> {
+  if (process.env.ANTHROPIC_BASE_URL) return process.env.ANTHROPIC_BASE_URL;
+  const discovered = await discoverClaudeUpstream();
+  return discovered ?? 'https://api.anthropic.com';
 }

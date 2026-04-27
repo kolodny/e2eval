@@ -218,7 +218,7 @@ export type StartAnthropicProxyOpts = {
    * brings its own resolver. Defaults to `process.env.ANTHROPIC_BASE_URL`
    * → `https://api.anthropic.com`.
    */
-  upstreamResolver?: () => string;
+  upstreamResolver?: () => string | Promise<string>;
   /**
    * Tool name used as the redirect target on short-circuit. Claude has
    * `Bash`; opencode has `bash`. If your agent's redirect tool takes a
@@ -295,7 +295,7 @@ const DEFAULT_UPSTREAM_RESOLVER = (): string =>
 export type { AgentProxy };
 
 export async function startAnthropicProxy(opts: StartAnthropicProxyOpts): Promise<AgentProxy> {
-  const liveUpstream = opts.upstream ?? (opts.upstreamResolver ?? DEFAULT_UPSTREAM_RESOLVER)();
+  const liveUpstream = opts.upstream ?? await (opts.upstreamResolver ?? DEFAULT_UPSTREAM_RESOLVER)();
   const buildRedirectInput = opts.redirectInputBuilder ?? encodeAsToolRedirect;
 
   // If replay is requested, route the proxy's upstream through an
