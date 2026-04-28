@@ -257,6 +257,36 @@ export type StartAnthropicProxyOpts = {
     recording: Recording;
     upTo: number;
   };
+  /**
+   * Optional pointer-dereferencer for tools that spool large outputs
+   * to disk and return a marker on the wire (e.g. claude's
+   * `<persisted-output>` for oversized Bash / MCP results).
+   *
+   * Per tool_result the proxy:
+   *   1. `detect(wireResult)` — return truthy "pointer info" if this
+   *      result is a spooled-output marker, else null.
+   *   2. `read(pointer)` — load the underlying file. The result is
+   *      handed to the middleware chain so middleware sees the full
+   *      content as if it had been inline.
+   *   3. `write(pointer, finalResult)` — persist any middleware
+   *      mutation back to disk. The agent's next `Read` of that path
+   *      sees the mutated content.
+   *   4. `rewriteWire(pointer, original)` — produce the wire-side
+   *      tool_result the LLM should see. Typically strips the inline
+   *      preview that the marker carries, so unredacted content
+   *      doesn't leak across turns; the path stays so the LLM can
+   *      Read it. The original pointer envelope is preserved by
+   *      design — replay/record stay byte-stable in shape.
+   *
+   * Adapter-internal: opencode shares this provider but doesn't have
+   * a pointer convention, so it just doesn't pass a dereferencer.
+   */
+  dereferencer?: {
+    detect: (real: ToolResult) => unknown | null | Promise<unknown | null>;
+    read: (pointer: unknown) => Promise<ToolResult>;
+    write: (pointer: unknown, result: ToolResult) => Promise<void>;
+    rewriteWire: (pointer: unknown, original: ToolResult) => ToolResult;
+  };
 };
 
 /**
@@ -402,7 +432,10 @@ export async function startAnthropicProxy(opts: StartAnthropicProxyOpts): Promis
     }
 
     // Walk user-message tool_result blocks: resolve pending handlers
-    // first, then apply substitutions.
+    // first, then apply substitutions. For pointer-style results
+    // (e.g. claude's `<persisted-output>`) the dereferencer reads the
+    // spooled file so middleware sees full content; the wire keeps the
+    // pointer envelope but with its inline preview stripped.
     for (const m of body.messages as Message[]) {
       if (m.role !== 'user' || typeof m.content === 'string') continue;
       for (const block of m.content) {
@@ -410,16 +443,44 @@ export async function startAnthropicProxy(opts: StartAnthropicProxyOpts): Promis
         const tr = block as any as { tool_use_id: string; content: unknown; is_error?: boolean };
         const id = tr.tool_use_id;
 
-        const realResult: ToolResult = {
+        const wireResult: ToolResult = {
           content: parseToolResultContent(tr.content),
           isError: !!tr.is_error,
         };
-        await state.resolvePending(id, realResult);
+
+        // Detect on every walk — the wire is rebuilt each request, so a
+        // pointer's preview-strip needs to happen each time we see it.
+        const pointer = opts.dereferencer
+          ? await opts.dereferencer.detect(wireResult)
+          : null;
+
+        // First pass for this id (no substitution yet): hand the
+        // dereferenced (or wire) content to middleware, then write back
+        // any mutation. Subsequent walks just splice the recorded sub.
+        if (!state.getSubstitution(id)) {
+          let realResult = wireResult;
+          if (pointer && opts.dereferencer) {
+            realResult = await opts.dereferencer.read(pointer);
+            realResult.isError = wireResult.isError;
+          }
+          await state.resolvePending(id, realResult);
+          if (pointer && opts.dereferencer) {
+            const fresh = state.getSubstitution(id);
+            if (fresh) await opts.dereferencer.write(pointer, fresh.result);
+          }
+        }
 
         const sub = state.getSubstitution(id);
         if (sub) {
-          tr.content = sub.result.content;
-          tr.is_error = !!sub.result.isError;
+          if (pointer && opts.dereferencer) {
+            // Wire keeps the pointer envelope but loses the preview so
+            // unredacted content doesn't leak in conversation history.
+            const rewritten = opts.dereferencer.rewriteWire(pointer, wireResult);
+            tr.content = rewritten.content;
+          } else {
+            tr.content = sub.result.content;
+            tr.is_error = !!sub.result.isError;
+          }
           state.emitToolCallOnce(id);
         }
       }

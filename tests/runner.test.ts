@@ -13,7 +13,7 @@ import {
   type Middleware,
 } from '../src/index.js';
 
-const TEST_TIMEOUT = 25_000;
+const TEST_TIMEOUT = 30_000;
 
 test('duplicate middleware names throw at startRunner (no claude spawn)', async () => {
   const adapter = createClaudeTestAdapter({

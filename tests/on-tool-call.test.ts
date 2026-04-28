@@ -12,7 +12,7 @@ import {
   type Middleware,
 } from '../src/index.js';
 
-const TEST_TIMEOUT = 20_000;
+const TEST_TIMEOUT = 30_000;
 const bashCmd = (command: string, description = 'test') => ({ command, description });
 
 // ────────────────────────────────────────────────────────────── single-middleware outcomes

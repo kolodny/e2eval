@@ -46,7 +46,7 @@ export {
 } from './core/proxy/middleware.js';
 
 // Utilities (for middleware authors)
-export { escapeXml, tryParseJson, normaliseForMatch, longestCommonSubstringRatio } from './core/utils.js';
+export { escapeXml, tryParseJson } from './core/utils.js';
 
 // Adapters
 export { default as claudeAdapter } from './adapters/claude/adapter.js';

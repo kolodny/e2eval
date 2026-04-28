@@ -3,17 +3,14 @@
  *
  * `tryParseJson` is the only one with non-trivial logic (depth-aware
  * brace scanning, quoted-string awareness, prose-then-JSON last-block
- * preference). `escapeXml` / `normaliseForMatch` /
- * `longestCommonSubstringRatio` are tiny enough that their behavior is
- * obvious from one example each — included for coverage.
+ * preference). `escapeXml` is tiny enough that its behavior is obvious
+ * from one example each — included for coverage.
  */
 import { test } from 'node:test';
 import { strict as assert } from 'node:assert';
 import {
   tryParseJson,
   escapeXml,
-  normaliseForMatch,
-  longestCommonSubstringRatio,
 } from '../src/index.js';
 
 // ────────────────────────────────────────────────────────────── tryParseJson
@@ -127,35 +124,3 @@ test('escapeXml: ampersand replaced first (no double-encoding)', () => {
   assert.equal(escapeXml('<&>'), '&lt;&amp;&gt;');
 });
 
-// ────────────────────────────────────────────────────────────── normaliseForMatch
-
-test('normaliseForMatch: lowercases, collapses whitespace, unescapes common sequences', () => {
-  assert.equal(
-    normaliseForMatch('Hello\\nWorld\\t\\"quoted\\"   spaces'),
-    'hello world "quoted" spaces',
-  );
-});
-
-test('normaliseForMatch: backslash escape unescaped', () => {
-  assert.equal(normaliseForMatch('a\\\\b'), 'a\\b');
-});
-
-// ────────────────────────────────────────────────────────────── longestCommonSubstringRatio
-
-test('longestCommonSubstringRatio: full match → 1', () => {
-  assert.equal(longestCommonSubstringRatio('abc', 'xxxabcxxx'), 1);
-});
-
-test('longestCommonSubstringRatio: no match → 0', () => {
-  assert.equal(longestCommonSubstringRatio('zzz', 'abcdef'), 0);
-});
-
-test('longestCommonSubstringRatio: partial match → ratio of longest substring length to needle length', () => {
-  // "abcd" in "xxabcxxx" → longest common substring is "abc" (3 chars), needle is 4 → 0.75.
-  assert.equal(longestCommonSubstringRatio('abcd', 'xxabcxxx'), 0.75);
-});
-
-test('longestCommonSubstringRatio: empty inputs → 0', () => {
-  assert.equal(longestCommonSubstringRatio('', 'anything'), 0);
-  assert.equal(longestCommonSubstringRatio('anything', ''), 0);
-});
