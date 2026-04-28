@@ -17,7 +17,8 @@ import { mkdtemp, readFile, writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { persistedOutputDereferencer } from '../src/adapters/claude/proxy.js';
-import type { ToolResult } from '../src/index.js';
+import { startChain } from '../src/core/proxy/middleware.js';
+import type { Middleware, ToolResult } from '../src/index.js';
 
 function persistedEnvelope(filePath: string, sizeKB: string, preview: string): string {
   return [
@@ -66,23 +67,49 @@ test('detect: multi-block content → null (only single-text-block matches)', ()
 
 // ────────────────────────────────────────────────────────────── rewriteWire
 
-test('rewriteWire: strips the Preview block, keeps path + tags', () => {
-  const text = persistedEnvelope('/tmp/foo.txt', '48.8', 'leak-this-preview-text');
-  const tr = wireResult(text);
-  const out = persistedOutputDereferencer.rewriteWire({ path: '/tmp/foo.txt', kind: 'text' }, tr);
-  const stripped = (out.content[0] as { text: string }).text;
-  assert.match(stripped, /<persisted-output>/);
-  assert.match(stripped, /Full output saved to: \/tmp\/foo\.txt/);
-  assert.match(stripped, /<\/persisted-output>$/);
-  // The unredacted preview must be gone.
-  assert.equal(stripped.includes('leak-this-preview-text'), false);
-  assert.equal(stripped.includes('Preview (first'), false);
+test('rewriteWire: rebuilds Preview block from the (post-write) file content', async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'e2eval-deref-'));
+  try {
+    const file = path.join(dir, 'after-scrub.txt');
+    // Original wire envelope mentions the unredacted preview claude
+    // captured at spool time. The file on disk has already been
+    // scrubbed by middleware at this point in the flow.
+    const wireText = persistedEnvelope(file, '48.8', 'leak-this-preview-text');
+    await writeFile(file, 'POST_SCRUB_CONTENT no leaks here', 'utf8');
+
+    const out = await persistedOutputDereferencer.rewriteWire({ path: file, kind: 'text' }, wireResult(wireText));
+    const stripped = (out.content[0] as { text: string }).text;
+
+    // Envelope and path mention preserved (replay/record stay stable).
+    assert.match(stripped, /<persisted-output>/);
+    assert.match(stripped, new RegExp(`Full output saved to: ${file.replace(/\//g, '\\/')}`));
+    assert.match(stripped, /<\/persisted-output>$/);
+    // The preview reflects the on-disk (post-scrub) content, not the
+    // original leak.
+    assert.match(stripped, /Preview \(first 2KB\):/);
+    assert.match(stripped, /POST_SCRUB_CONTENT/);
+    assert.equal(stripped.includes('leak-this-preview-text'), false);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
 });
 
-test('rewriteWire: passes through unchanged if no Preview block', () => {
+test('rewriteWire: file missing → falls back to stripping preview entirely', async () => {
+  const wireText = persistedEnvelope('/tmp/this-path-does-not-exist-xyz.txt', '48.8', 'leak-text');
+  const out = await persistedOutputDereferencer.rewriteWire(
+    { path: '/tmp/this-path-does-not-exist-xyz.txt', kind: 'text' },
+    wireResult(wireText),
+  );
+  const stripped = (out.content[0] as { text: string }).text;
+  assert.equal(stripped.includes('leak-text'), false);
+  assert.equal(stripped.includes('Preview (first'), false);
+  assert.match(stripped, /<\/persisted-output>$/);
+});
+
+test('rewriteWire: passes through unchanged if no Preview block', async () => {
   const text = '<persisted-output>\nOutput too large. Full output saved to: /tmp/x.txt\n</persisted-output>';
   const tr = wireResult(text);
-  const out = persistedOutputDereferencer.rewriteWire({ path: '/tmp/x.txt', kind: 'text' }, tr);
+  const out = await persistedOutputDereferencer.rewriteWire({ path: '/tmp/x.txt', kind: 'text' }, tr);
   assert.equal((out.content[0] as { text: string }).text, text);
 });
 
@@ -154,6 +181,91 @@ test('read+write: json format (MCP) — content blocks visible to middleware; sc
     assert.equal(onDisk[0].text.includes('SECRET_TOKEN'), false);
     assert.match(onDisk[0].text, /\[REDACTED\]/);
     assert.match(onDisk[1].text, /\[REDACTED\]/);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('chain: two middleware mutate dereffed content; both mutations land on disk and in the preview', async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'e2eval-deref-'));
+  try {
+    const file = path.join(dir, 'spooled.txt');
+    const original = 'SECRET_TOKEN=abc PASSWORD=xyz everything-else-stays\n'.repeat(100);
+    await writeFile(file, original, 'utf8');
+    const pointer = { path: file, kind: 'text' as const };
+
+    // Outer scrubs SECRET_TOKEN; inner scrubs PASSWORD. Both mutate the
+    // text and pass through. Inner sees the dereffed content first
+    // (Koa-style: outer wraps, descends, then sees inner's output).
+    const outer: Middleware = {
+      name: 'outer-scrub-secret',
+      async onToolCall({ input, handler }) {
+        const real = await handler(input);
+        const text = (real.content[0] as { text: string }).text;
+        return {
+          content: [{ type: 'text', text: text.replaceAll(/SECRET_TOKEN=\w+/g, '[OUTER]') }],
+          isError: real.isError,
+        };
+      },
+    };
+    const inner: Middleware = {
+      name: 'inner-scrub-password',
+      async onToolCall({ input, handler }) {
+        const real = await handler(input);
+        // Inner sees the raw dereffed content — both needles still here.
+        assert.match((real.content[0] as { text: string }).text, /SECRET_TOKEN=abc/);
+        assert.match((real.content[0] as { text: string }).text, /PASSWORD=xyz/);
+        const text = (real.content[0] as { text: string }).text;
+        return {
+          content: [{ type: 'text', text: text.replaceAll(/PASSWORD=\w+/g, '[INNER]') }],
+          isError: real.isError,
+        };
+      },
+    };
+
+    // Drive the chain manually with a fake backend that returns the
+    // dereffed file content (mirrors what the proxy does with `read`).
+    const outcome = await startChain([outer, inner], {
+      evalName: 'chain-test',
+      config: {} as any,
+      data: {} as any,
+      abort: () => {},
+      toolUseId: 'tu_chain',
+      server: 'native',
+      tool: 'Bash',
+      input: {},
+    });
+    assert.equal(outcome.kind, 'descended');
+    if (outcome.kind !== 'descended') return;
+
+    const dereffed = await persistedOutputDereferencer.read(pointer);
+    outcome.resolveBackend(dereffed);
+    const final = await outcome.chainComplete;
+
+    // Both mutations applied (chain order: backend → inner → outer).
+    const finalText = (final.content[0] as { text: string }).text;
+    assert.equal(finalText.includes('SECRET_TOKEN'), false, 'outer should have removed SECRET_TOKEN');
+    assert.equal(finalText.includes('PASSWORD'), false, 'inner should have removed PASSWORD');
+    assert.match(finalText, /\[OUTER\]/);
+    assert.match(finalText, /\[INNER\]/);
+
+    // Write back: on-disk file reflects both mutations.
+    await persistedOutputDereferencer.write(pointer, final);
+    const onDisk = await readFile(file, 'utf8');
+    assert.equal(onDisk.includes('SECRET_TOKEN'), false);
+    assert.equal(onDisk.includes('PASSWORD'), false);
+    assert.match(onDisk, /\[OUTER\]/);
+    assert.match(onDisk, /\[INNER\]/);
+
+    // Wire preview is rebuilt from disk → also reflects both mutations.
+    const wireText = persistedEnvelope(file, '5.2', 'leak-from-original-preview');
+    const rewritten = await persistedOutputDereferencer.rewriteWire(pointer, wireResult(wireText));
+    const wire = (rewritten.content[0] as { text: string }).text;
+    assert.equal(wire.includes('SECRET_TOKEN'), false);
+    assert.equal(wire.includes('PASSWORD'), false);
+    assert.equal(wire.includes('leak-from-original-preview'), false);
+    assert.match(wire, /\[OUTER\]/);
+    assert.match(wire, /\[INNER\]/);
   } finally {
     await rm(dir, { recursive: true, force: true });
   }

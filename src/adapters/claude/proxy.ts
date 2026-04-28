@@ -58,9 +58,11 @@ type PersistedPointer = { path: string; kind: 'json' | 'text' };
  * in `<tool_use_id>.json`.
  */
 const PERSISTED_RE = /<persisted-output>[\s\S]*?Full output saved to: (.+?)\n/;
-// Strips from the blank line preceding "Preview" up to (but not
-// including) the closing tag — leaves the path mention intact.
+// Matches the entire preview block (blank line + "Preview (first…)" +
+// content + trailing "...") up to but not including the close tag —
+// used to splice in a freshly-rebuilt preview after middleware writes.
 const PREVIEW_RE = /\n\s*\nPreview \(first[\s\S]*?(?=\n<\/persisted-output>)/;
+const PREVIEW_BYTES = 2048;
 
 /**
  * Exported for unit tests. Stable shape (same Dereferencer type as
@@ -106,11 +108,28 @@ export const persistedOutputDereferencer: NonNullable<StartAnthropicProxyOpts['d
     await writeFile(info.path, text, 'utf8');
   },
 
-  rewriteWire(_pointer, original): ToolResult {
+  async rewriteWire(pointer, original): Promise<ToolResult> {
     if (original.content.length !== 1 || original.content[0].type !== 'text') return original;
-    const text = (original.content[0] as { text?: string }).text ?? '';
+    const wireText = (original.content[0] as { text?: string }).text ?? '';
+
+    // Read the file as it stands now — by this point middleware has
+    // mutated it (if it wanted to), so the preview we synthesize here
+    // shows post-mutation content. If the file is gone for some reason
+    // (race, manual cleanup), fall back to stripping the preview entirely.
+    let onDisk: string;
+    try {
+      onDisk = await readFile((pointer as PersistedPointer).path, 'utf8');
+    } catch {
+      return {
+        content: [{ type: 'text', text: wireText.replace(PREVIEW_RE, '') }],
+        isError: original.isError,
+      };
+    }
+
+    const trimmed = onDisk.slice(0, PREVIEW_BYTES);
+    const newPreview = `\n\nPreview (first 2KB):\n${trimmed}\n...`;
     return {
-      content: [{ type: 'text', text: text.replace(PREVIEW_RE, '') }],
+      content: [{ type: 'text', text: wireText.replace(PREVIEW_RE, newPreview) }],
       isError: original.isError,
     };
   },

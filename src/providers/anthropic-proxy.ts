@@ -285,7 +285,7 @@ export type StartAnthropicProxyOpts = {
     detect: (real: ToolResult) => unknown | null | Promise<unknown | null>;
     read: (pointer: unknown) => Promise<ToolResult>;
     write: (pointer: unknown, result: ToolResult) => Promise<void>;
-    rewriteWire: (pointer: unknown, original: ToolResult) => ToolResult;
+    rewriteWire: (pointer: unknown, original: ToolResult) => Promise<ToolResult> | ToolResult;
   };
 };
 
@@ -473,9 +473,10 @@ export async function startAnthropicProxy(opts: StartAnthropicProxyOpts): Promis
         const sub = state.getSubstitution(id);
         if (sub) {
           if (pointer && opts.dereferencer) {
-            // Wire keeps the pointer envelope but loses the preview so
-            // unredacted content doesn't leak in conversation history.
-            const rewritten = opts.dereferencer.rewriteWire(pointer, wireResult);
+            // Wire keeps the envelope but its preview is regenerated
+            // from the (now-mutated) file, so the LLM sees post-scrub
+            // content in the preview rather than the original leak.
+            const rewritten = await opts.dereferencer.rewriteWire(pointer, wireResult);
             tr.content = rewritten.content;
           } else {
             tr.content = sub.result.content;
