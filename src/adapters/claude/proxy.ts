@@ -7,8 +7,10 @@
  *   - Redirect tool name is `Bash` (capitalised — claude's native tool).
  *   - `<persisted-output>` dereferencing: when claude spools a large
  *     Bash or MCP result to disk and returns a pointer, the proxy
- *     reads the file so middleware sees full content; the wire keeps
- *     the envelope (preview stripped) so the LLM is unaware.
+ *     reads the file so middleware sees full content. After middleware
+ *     writes back, the wire keeps the same envelope (path, size) but
+ *     its inline preview is regenerated from the now-mutated file so
+ *     the LLM sees post-scrub content if it ever inspects the preview.
  *   - When no `upstream:` is passed and `ANTHROPIC_BASE_URL` isn't in
  *     the env, we ask claude itself what it would resolve via a
  *     UserPromptSubmit hook trick (see `discover-upstream.ts`). That

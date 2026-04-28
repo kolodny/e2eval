@@ -272,11 +272,13 @@ export type StartAnthropicProxyOpts = {
    *      mutation back to disk. The agent's next `Read` of that path
    *      sees the mutated content.
    *   4. `rewriteWire(pointer, original)` — produce the wire-side
-   *      tool_result the LLM should see. Typically strips the inline
-   *      preview that the marker carries, so unredacted content
-   *      doesn't leak across turns; the path stays so the LLM can
-   *      Read it. The original pointer envelope is preserved by
-   *      design — replay/record stay byte-stable in shape.
+   *      tool_result the LLM should see. Called after `write`, so the
+   *      file on disk reflects any middleware mutation by this point.
+   *      Implementations typically rebuild the inline preview from the
+   *      post-write file content (so unredacted content doesn't leak
+   *      and the preview matches what the LLM would see if it Reads
+   *      the path) while preserving the rest of the pointer envelope —
+   *      replay/record stay byte-stable in shape.
    *
    * Adapter-internal: opencode shares this provider but doesn't have
    * a pointer convention, so it just doesn't pass a dereferencer.
@@ -434,8 +436,9 @@ export async function startAnthropicProxy(opts: StartAnthropicProxyOpts): Promis
     // Walk user-message tool_result blocks: resolve pending handlers
     // first, then apply substitutions. For pointer-style results
     // (e.g. claude's `<persisted-output>`) the dereferencer reads the
-    // spooled file so middleware sees full content; the wire keeps the
-    // pointer envelope but with its inline preview stripped.
+    // spooled file so middleware sees full content; after writeback
+    // the wire keeps the pointer envelope but its inline preview is
+    // regenerated from the now-mutated file.
     for (const m of body.messages as Message[]) {
       if (m.role !== 'user' || typeof m.content === 'string') continue;
       for (const block of m.content) {
@@ -449,7 +452,7 @@ export async function startAnthropicProxy(opts: StartAnthropicProxyOpts): Promis
         };
 
         // Detect on every walk — the wire is rebuilt each request, so a
-        // pointer's preview-strip needs to happen each time we see it.
+        // pointer's preview rebuild needs to happen each time we see it.
         const pointer = opts.dereferencer
           ? await opts.dereferencer.detect(wireResult)
           : null;
