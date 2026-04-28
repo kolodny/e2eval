@@ -138,12 +138,13 @@ export function createProxyState(ctx: ProxyStateCtx): ProxyState {
   const emitted = new Set<string>();
 
   return {
-    runChain({ server, tool, chainInput }) {
+    runChain({ callId, server, tool, chainInput }) {
       return startChain(ctx.middleware, {
         evalName: ctx.evalName,
         config: ctx.config,
         data: ctx.data,
         abort: ctx.abort,
+        toolUseId: callId,
         server,
         tool,
         input: chainInput,

@@ -404,7 +404,9 @@ async function runMiddlewareChain(
   const outcome: ChainOutcome = await startChain(middleware, {
     evalName: 'isolation-test',
     config: {} as any,
+    data: {} as any,
     abort: () => {},
+    toolUseId: 'tu_isolation',
     server: opts.server ?? 'native',
     tool: opts.tool ?? 'Bash',
     input: opts.input,

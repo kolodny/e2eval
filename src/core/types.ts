@@ -107,6 +107,14 @@ export type Handler = (input: unknown) => Promise<ToolResult>;
  *     to the next middleware as if this one weren't installed.
  */
 export type OnToolCallArg = MiddlewareContext & {
+  /**
+   * Per-call id from the wire format — Anthropic's `tool_use.id`
+   * (`tu_xxx`), OpenAI Responses' `function_call.call_id` (`call_xxx`).
+   * Same value as the eventual `ToolCall.toolUseId` in `afterEval`'s
+   * `toolCalls`, so middleware can correlate on/after-call work, or
+   * key per-call state in `ctx.data`.
+   */
+  toolUseId: string;
   /** MCP server name (e.g. `core-tools`), or `'native'` for non-MCP tools. */
   server: string;
   /** Short tool name — `mcp__server__tool` is split into (server, tool). */

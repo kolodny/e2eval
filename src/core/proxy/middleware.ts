@@ -28,6 +28,8 @@ export type ChainCtx = {
   config: Readonly<Config>;
   data: Data;
   abort: (reason?: unknown) => void;
+  /** Wire-format per-call id (Anthropic `tool_use.id`, Responses `call_id`). */
+  toolUseId: string;
   server: string;
   tool: string;
   input: unknown;
@@ -109,6 +111,7 @@ export function startChain(
         config: ctx.config,
         data: ctx.data,
         abort: ctx.abort,
+        toolUseId: ctx.toolUseId,
         server: ctx.server,
         tool: ctx.tool,
         input: args,
