@@ -333,6 +333,14 @@ export type EvalResult = {
   results: Record<string, unknown>;
   /** Every tool call the LLM saw a result for, with the post-middleware view. */
   toolCalls: ToolCall[];
+  /**
+   * Per-run mutable scratch shared across `beforeEval` / `onToolCall` /
+   * `afterEval` (`ctx.data`). Returned as-is — the same object identity
+   * middleware mutated during the run, post-`afterEval`. Use augmentations
+   * in `declare module 'e2eval/types' { interface Data { ... } }` for typed
+   * access.
+   */
+  data: Data;
   evalName: string;
   agent: string;
   elapsedSeconds: number;

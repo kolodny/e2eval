@@ -314,6 +314,7 @@ async function runEval(ev: Eval, opts: RunOptions): Promise<EvalResult> {
       answer: transcript.answer,
       results,
       toolCalls,
+      data,
       evalName: ev.name,
       agent: adapter.name,
       elapsedSeconds: Math.round((Date.now() - startTime) / 1000),

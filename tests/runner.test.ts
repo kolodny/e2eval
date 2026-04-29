@@ -118,7 +118,7 @@ test('beforeEval rewrites the prompt; afterEval result lands in results', { time
   assert.deepEqual(ran.results.pre, { question: 'hello', answer: 'k' });
 });
 
-test('EvalResult shape: answer, results, toolCalls, evalName, agent, elapsedSeconds', { timeout: TEST_TIMEOUT }, async () => {
+test('EvalResult shape: answer, results, toolCalls, data, evalName, agent, elapsedSeconds', { timeout: TEST_TIMEOUT }, async () => {
   const adapter = createClaudeTestAdapter({
     respond: [{ content: [{ type: 'text', text: 'hi' }] }],
   });
@@ -132,6 +132,39 @@ test('EvalResult shape: answer, results, toolCalls, evalName, agent, elapsedSeco
   assert.ok(Array.isArray(ran.toolCalls));
   assert.equal(typeof ran.elapsedSeconds, 'number');
   assert.equal(typeof ran.results, 'object');
+  assert.equal(typeof ran.data, 'object');
+});
+
+test('EvalResult.data exposes mutations from beforeEval/afterEval (same object identity)', { timeout: TEST_TIMEOUT }, async () => {
+  const adapter = createClaudeTestAdapter({
+    respond: [{ content: [{ type: 'text', text: 'ok' }] }],
+  });
+
+  let dataInBefore: any;
+  let dataInAfter: any;
+  const m: Middleware = {
+    name: 'stash',
+    async beforeEval({ data }) {
+      dataInBefore = data;
+      (data as any).citations = ['source-1'];
+    },
+    async afterEval({ data }) {
+      dataInAfter = data;
+      (data as any).graderNotes = 'looks good';
+      return { kept: true };
+    },
+  };
+
+  const runner = await startRunner({ adapter, middleware: [m] });
+  const ran = await runner.run({ name: 'data-out', question: 'x' });
+  await runner.close();
+
+  // Same object identity throughout the run and on the result.
+  assert.equal(ran.data, dataInBefore);
+  assert.equal(ran.data, dataInAfter);
+  // Mutations from both phases are visible on EvalResult.data.
+  assert.deepEqual((ran.data as any).citations, ['source-1']);
+  assert.equal((ran.data as any).graderNotes, 'looks good');
 });
 
 test('multiple beforeEval middleware compose: each sees the prior\'s rewritten prompt', { timeout: TEST_TIMEOUT }, async () => {
