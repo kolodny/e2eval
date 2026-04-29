@@ -10,6 +10,7 @@ import { strict as assert } from 'node:assert';
 import {
   startRunner,
   createClaudeTestAdapter,
+  type AgentAdapter,
   type Middleware,
 } from '../src/index.js';
 
@@ -317,6 +318,70 @@ test('timeoutMs: no timeout when omitted (run finishes normally even if slow-ish
   await runner.close();
 
   assert.match(ran.answer, /finished/);
+});
+
+test('onStdout/onStderr from runner.run are threaded into adapter.run opts', { timeout: TEST_TIMEOUT }, async () => {
+  // Mock adapter, not createClaudeTestAdapter — we want to verify the
+  // runner-level threading without depending on whether the spawned
+  // claude binary happens to write to stdout/stderr in this run. Real
+  // adapters (claude, opencode, codex) wire opts.onStdout/onStderr to
+  // their child process's stdout/stderr streams; that's tested by the
+  // adapter implementations themselves.
+  const adapter: AgentAdapter = {
+    name: 'mock-stream',
+    async startProxy() {
+      return { url: '', port: 0, upstream: '', async close() {} };
+    },
+    async run(opts) {
+      opts.onStdout?.(Buffer.from('event-1\n'));
+      opts.onStderr?.(Buffer.from('mcp warning\n'));
+      opts.onStdout?.(Buffer.from('event-2\n'));
+      return { answer: 'final' };
+    },
+    async callLLM() { return ''; },
+  };
+
+  const stdoutChunks: Buffer[] = [];
+  const stderrChunks: Buffer[] = [];
+
+  const runner = await startRunner({ adapter });
+  const ran = await runner.run(
+    { name: 'stream', question: 'x' },
+    {
+      onStdout: (c) => stdoutChunks.push(c),
+      onStderr: (c) => stderrChunks.push(c),
+    },
+  );
+  await runner.close();
+
+  assert.equal(Buffer.concat(stdoutChunks).toString('utf8'), 'event-1\nevent-2\n');
+  assert.equal(Buffer.concat(stderrChunks).toString('utf8'), 'mcp warning\n');
+  assert.equal(ran.answer, 'final');
+});
+
+test('onStdout/onStderr default to undefined when omitted', { timeout: TEST_TIMEOUT }, async () => {
+  let receivedOnStdout: unknown;
+  let receivedOnStderr: unknown;
+
+  const adapter: AgentAdapter = {
+    name: 'mock-no-stream',
+    async startProxy() {
+      return { url: '', port: 0, upstream: '', async close() {} };
+    },
+    async run(opts) {
+      receivedOnStdout = opts.onStdout;
+      receivedOnStderr = opts.onStderr;
+      return { answer: '' };
+    },
+    async callLLM() { return ''; },
+  };
+
+  const runner = await startRunner({ adapter });
+  await runner.run({ name: 'no-stream', question: 'x' });
+  await runner.close();
+
+  assert.equal(receivedOnStdout, undefined);
+  assert.equal(receivedOnStderr, undefined);
 });
 
 test('timeoutMs: middleware afterEval does not run when the agent run timed out', { timeout: TEST_TIMEOUT }, async () => {

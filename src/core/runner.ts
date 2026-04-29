@@ -82,6 +82,19 @@ export type EvalRunOpts = {
     recording: Recording;
     upTo: number;
   };
+  /**
+   * Stream agent stdout chunks (claude/codex stream-json, opencode JSON)
+   * as they arrive — useful for watching the conversation live. Chunks
+   * are Buffers and not line-aligned; accumulate and split on `\n`
+   * before parsing JSON.
+   */
+  onStdout?: (chunk: Buffer) => void;
+  /**
+   * Stream agent stderr chunks as they arrive — surface MCP server boot
+   * errors, tool dispatch failures, etc. When set, the adapter does NOT
+   * also forward stderr to `process.stderr`.
+   */
+  onStderr?: (chunk: Buffer) => void;
 };
 
 export type EvalRunner = {
@@ -146,6 +159,8 @@ export async function startRunner(config: RunnerConfig): Promise<EvalRunner> {
         replay: opts.replay,
         callLLM: config.callLLM,
         upstream: config.upstream,
+        onStdout: opts.onStdout,
+        onStderr: opts.onStderr,
       });
     },
     async close() {
@@ -181,6 +196,8 @@ type RunOptions = {
   replay?: { recording: Recording; upTo: number };
   callLLM?: CallLLM;
   upstream?: string;
+  onStdout?: (chunk: Buffer) => void;
+  onStderr?: (chunk: Buffer) => void;
 };
 
 async function runEval(ev: Eval, opts: RunOptions): Promise<EvalResult> {
@@ -266,6 +283,8 @@ async function runEval(ev: Eval, opts: RunOptions): Promise<EvalResult> {
       runDir,
       env: { ...process.env as Record<string, string> },
       signal: ac.signal,
+      onStdout: opts.onStdout,
+      onStderr: opts.onStderr,
     });
 
     if (ac.signal.aborted) {

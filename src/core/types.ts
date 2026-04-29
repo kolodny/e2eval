@@ -212,6 +212,21 @@ export type AgentRunOpts = {
   runDir: string;
   env: Record<string, string>;
   signal?: AbortSignal;
+  /**
+   * Stream agent stdout chunks as they arrive — typically the agent's
+   * native stream-json (claude `--output-format=stream-json`, codex
+   * `--json`) or terminal JSON (opencode). Buffer; convert with
+   * `.toString('utf8')`. Chunks aren't line-aligned, so accumulate and
+   * split on `\n` before parsing JSON.
+   */
+  onStdout?: (chunk: Buffer) => void;
+  /**
+   * Stream agent stderr chunks as they arrive — useful for surfacing
+   * MCP server boot errors, tool dispatch failures, etc. When set, the
+   * adapter does NOT also forward stderr to `process.stderr`; call
+   * `process.stderr.write(chunk)` from your callback if you want both.
+   */
+  onStderr?: (chunk: Buffer) => void;
 };
 
 /** Args passed to `AgentAdapter.startProxy` — handed straight through from the runner. */

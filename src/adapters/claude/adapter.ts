@@ -58,7 +58,9 @@ const adapter: AgentAdapter = {
       input: opts.prompt,
       ...(opts.signal ? { signal: opts.signal } : {}),
     })`claude --settings ${settings} --permission-mode=bypassPermissions --output-format=stream-json --verbose -p`;
-    proc.stderr?.pipe(process.stderr, { end: false });
+    if (opts.onStdout) proc.stdout?.on('data', (c: Buffer) => opts.onStdout!(c));
+    if (opts.onStderr) proc.stderr?.on('data', (c: Buffer) => opts.onStderr!(c));
+    else proc.stderr?.pipe(process.stderr, { end: false });
     const result = await proc;
     return parseClaudeTranscript(result.stdout ?? '');
   },

@@ -81,7 +81,9 @@ export function createOpencodeAdapter(adapterOpts: OpencodeAdapterOptions = {}):
         input: opts.prompt,
         ...(opts.signal ? { signal: opts.signal } : {}),
       })`opencode run --format json --model ${`${provider}/${model}`} --dangerously-skip-permissions`;
-      proc.stderr?.pipe(process.stderr, { end: false });
+      if (opts.onStdout) proc.stdout?.on('data', (c: Buffer) => opts.onStdout!(c));
+      if (opts.onStderr) proc.stderr?.on('data', (c: Buffer) => opts.onStderr!(c));
+      else proc.stderr?.pipe(process.stderr, { end: false });
       const result = await proc;
       return parseOpencodeTranscript(result.stdout ?? '');
     },

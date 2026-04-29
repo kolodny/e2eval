@@ -62,7 +62,9 @@ const codexAdapter: AgentAdapter = {
       input: opts.prompt,
       ...(opts.signal ? { signal: opts.signal } : {}),
     })`codex ${args}`;
-    proc.stderr?.pipe(process.stderr, { end: false });
+    if (opts.onStdout) proc.stdout?.on('data', (c: Buffer) => opts.onStdout!(c));
+    if (opts.onStderr) proc.stderr?.on('data', (c: Buffer) => opts.onStderr!(c));
+    else proc.stderr?.pipe(process.stderr, { end: false });
     const result = await proc;
     return parseCodexTranscript(result.stdout ?? '');
   },
@@ -94,7 +96,9 @@ export function createCodexAdapter(opts: CodexAdapterOptions = {}): AgentAdapter
         stdio: ['pipe', 'pipe', 'pipe'], input: runOpts.prompt,
         ...(runOpts.signal ? { signal: runOpts.signal } : {}),
       })`codex ${args}`;
-      proc.stderr?.pipe(process.stderr, { end: false });
+      if (runOpts.onStdout) proc.stdout?.on('data', (c: Buffer) => runOpts.onStdout!(c));
+      if (runOpts.onStderr) proc.stderr?.on('data', (c: Buffer) => runOpts.onStderr!(c));
+      else proc.stderr?.pipe(process.stderr, { end: false });
       const result = await proc;
       return parseCodexTranscript(result.stdout ?? '');
     },
