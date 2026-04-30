@@ -20,15 +20,13 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
-import { $ } from 'zx';
 import type {
   AgentAdapter, AgentProxy, AgentRunOpts, StartProxyOpts,
 } from '../../core/types.js';
+import { spawnStreaming } from '../../core/process.js';
 import { startCodexProxy } from './proxy.js';
-import { parseCodexTranscript } from './parse-transcript.js';
+import { createStreamingCodexParser } from './parse-transcript.js';
 import { startFakeUpstream } from '../../core/test/fake-upstream.js';
-
-$.verbose = false;
 
 /**
  * Build a minimal `~/.codex/config.toml` defining a provider that
@@ -137,25 +135,25 @@ export function createCodexTestAdapter(script: CodexAgentScript): AgentAdapter {
           minimalCodexConfig(`${opts.proxyUrl}/v1`),
         );
 
-        const args = [
-          'exec',
-          '--skip-git-repo-check',
-          '--dangerously-bypass-approvals-and-sandbox',
-          '--json',
-        ];
-
-        const proc = $({
+        const parser = createStreamingCodexParser();
+        await spawnStreaming({
+          cmd: 'codex',
+          args: [
+            'exec',
+            '--skip-git-repo-check',
+            '--dangerously-bypass-approvals-and-sandbox',
+            '--json',
+          ],
           cwd: opts.runDir,
           env: { ...opts.env, OPENAI_API_KEY: 'sk-fake-eval', CODEX_HOME: codexHome },
-          timeout: '5m',
-          nothrow: true,
-          stdio: ['pipe', 'pipe', 'pipe'],
-          input: opts.prompt,
-          ...(opts.signal ? { signal: opts.signal } : {}),
-        })`codex ${args}`;
-        proc.stderr?.pipe(process.stderr, { end: false });
-        const result = await proc;
-        return parseCodexTranscript(result.stdout ?? '');
+          stdin: opts.prompt,
+          timeoutMs: 5 * 60_000,
+          signal: opts.signal,
+          onStdoutChunk: opts.onStdout,
+          onStderrChunk: opts.onStderr,
+          onStdoutLine: (line) => parser.feed(line),
+        });
+        return parser.finalize();
       } finally {
         await rm(codexHome, { recursive: true, force: true }).catch(() => {});
       }

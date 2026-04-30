@@ -20,18 +20,16 @@
  * the proxy will redirect to on short-circuit.
  */
 import { randomUUID } from 'node:crypto';
-import { $ } from 'zx';
 import type {
   AgentAdapter, AgentProxy, AgentRunOpts, StartProxyOpts,
 } from '../../core/types.js';
+import { spawnStreaming } from '../../core/process.js';
 import { startOpencodeProxy } from './proxy.js';
-import { parseOpencodeTranscript } from './parse-transcript.js';
+import { createStreamingOpencodeParser } from './parse-transcript.js';
 import { startFakeUpstream } from '../../core/test/fake-upstream.js';
 import type {
   AgentScript, ScriptedResponse, ScriptedRequest,
 } from '../../providers/anthropic-script-types.js';
-
-$.verbose = false;
 
 // Re-export the shared Anthropic-wire script types so opencode users
 // don't have to import claude-named modules.
@@ -140,18 +138,20 @@ export function createOpencodeTestAdapter(
         ...runOpts.env,
         OPENCODE_CONFIG_CONTENT: buildConfigContent(provider, `${runOpts.proxyUrl}/v1`),
       };
-      const proc = $({
+      const parser = createStreamingOpencodeParser();
+      await spawnStreaming({
+        cmd: 'opencode',
+        args: ['run', '--format', 'json', '--model', `${provider}/${model}`, '--dangerously-skip-permissions'],
         cwd: runOpts.runDir,
         env,
-        timeout: '2m',
-        nothrow: true,
-        stdio: ['pipe', 'pipe', 'pipe'],
-        input: runOpts.prompt,
-        ...(runOpts.signal ? { signal: runOpts.signal } : {}),
-      })`opencode run --format json --model ${`${provider}/${model}`} --dangerously-skip-permissions`;
-      proc.stderr?.pipe(process.stderr, { end: false });
-      const result = await proc;
-      return parseOpencodeTranscript(result.stdout ?? '');
+        stdin: runOpts.prompt,
+        timeoutMs: 2 * 60_000,
+        signal: runOpts.signal,
+        onStdoutChunk: runOpts.onStdout,
+        onStderrChunk: runOpts.onStderr,
+        onStdoutLine: (line) => parser.feed(line),
+      });
+      return parser.finalize();
     },
 
     callLLM: async () => '',

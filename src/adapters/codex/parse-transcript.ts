@@ -11,34 +11,40 @@
  *   {type:'error', message}
  *
  * The final answer is the last `agent_message` item's text. `thread_id`
- * from the first `thread.started` event populates `sessionId`.
+ * from the first `thread.started` event populates `sessionId`. Feed
+ * each JSONL line to `feed()` as it arrives, then `finalize()` to read
+ * out `{answer, sessionId}`.
  */
 import type { NormalizedTranscript } from '../../core/types.js';
 
-export function parseCodexTranscript(streamJson: string): NormalizedTranscript {
-  const lines = streamJson.split('\n').filter(Boolean);
+export type StreamingCodexParser = {
+  feed(line: string): void;
+  finalize(): NormalizedTranscript;
+};
+
+export function createStreamingCodexParser(): StreamingCodexParser {
   let answer = '';
   let sessionId: string | undefined;
 
-  for (const line of lines) {
-    let entry: any;
-    try {
-      entry = JSON.parse(line);
-    } catch {
-      continue;
-    }
+  return {
+    feed(line: string) {
+      let entry: any;
+      try { entry = JSON.parse(line); } catch { return; }
 
-    if (entry?.type === 'thread.started' && typeof entry.thread_id === 'string' && !sessionId) {
-      sessionId = entry.thread_id;
-    } else if (entry?.type === 'item.completed') {
-      const item = entry.item;
-      if (item?.type === 'agent_message' && typeof item.text === 'string') {
-        // Last agent_message wins. Codex sometimes emits intermediate
-        // messages followed by a final summary; we take the latest.
-        answer = item.text;
+      if (entry?.type === 'thread.started' && typeof entry.thread_id === 'string' && !sessionId) {
+        sessionId = entry.thread_id;
+      } else if (entry?.type === 'item.completed') {
+        const item = entry.item;
+        if (item?.type === 'agent_message' && typeof item.text === 'string') {
+          // Last agent_message wins. Codex sometimes emits intermediate
+          // messages followed by a final summary; we take the latest.
+          answer = item.text;
+        }
       }
-    }
-  }
+    },
 
-  return { answer, sessionId };
+    finalize(): NormalizedTranscript {
+      return { answer, sessionId };
+    },
+  };
 }

@@ -7,6 +7,8 @@
  * Anthropic proxy. OpenCode's docs document `OPENCODE_CONFIG_CONTENT`
  * as the highest-priority config layer; opencode merges it deeply with
  * any other config files, so we only need to specify the override.
+ * Output is line-streamed through a parser that holds only
+ * `{answer, sessionId}` so memory is bounded regardless of run length.
  *
  * Defaults: provider `anthropic`, model `claude-haiku-4-5`. To target a
  * different provider name (e.g. a private gateway registered in the
@@ -14,13 +16,10 @@
  *
  *   const adapter = createOpencodeAdapter({ provider: 'my-gateway', model: '…' });
  */
-import { $ } from 'zx';
 import type { AgentAdapter } from '../../core/types.js';
-import { spawnWithStdin } from '../../core/process.js';
-import { parseOpencodeTranscript } from './parse-transcript.js';
+import { spawnStreaming, spawnWithStdin } from '../../core/process.js';
+import { createStreamingOpencodeParser } from './parse-transcript.js';
 import { startOpencodeProxy } from './proxy.js';
-
-$.verbose = false;
 
 export type OpencodeAdapterOptions = {
   /** Provider name to override (must exist in opencode's config or auth.json). Default `anthropic`. */
@@ -69,42 +68,38 @@ export function createOpencodeAdapter(adapterOpts: OpencodeAdapterOptions = {}):
         ...opts.env,
         OPENCODE_CONFIG_CONTENT: buildConfigContent(provider, `${opts.proxyUrl}/v1`),
       };
-      // stderr piped (not inherited) — see claude/adapter.ts for why:
-      // an orphaned child holding an inherited stderr fd blocks the
-      // outer node:test process from exiting.
-      const proc = $({
+      const parser = createStreamingOpencodeParser();
+      await spawnStreaming({
+        cmd: 'opencode',
+        args: ['run', '--format', 'json', '--model', `${provider}/${model}`, '--dangerously-skip-permissions'],
         cwd: opts.runDir,
         env,
-        timeout: '30m',
-        nothrow: true,
-        stdio: ['pipe', 'pipe', 'pipe'],
-        input: opts.prompt,
-        ...(opts.signal ? { signal: opts.signal } : {}),
-      })`opencode run --format json --model ${`${provider}/${model}`} --dangerously-skip-permissions`;
-      if (opts.onStdout) proc.stdout?.on('data', (c: Buffer) => opts.onStdout!(c));
-      if (opts.onStderr) proc.stderr?.on('data', (c: Buffer) => opts.onStderr!(c));
-      else proc.stderr?.pipe(process.stderr, { end: false });
-      const result = await proc;
-      return parseOpencodeTranscript(result.stdout ?? '');
+        stdin: opts.prompt,
+        timeoutMs: 30 * 60_000,
+        signal: opts.signal,
+        onStdoutChunk: opts.onStdout,
+        onStderrChunk: opts.onStderr,
+        onStdoutLine: (line) => parser.feed(line),
+      });
+      return parser.finalize();
     },
 
-    callLLM(prompt, opts) {
+    async callLLM(prompt, opts) {
       const timeout = opts?.timeout ?? 240_000;
       // Stand-alone single-shot — uses opencode `run` with no tools by
       // setting `--agent build-no-tools` if available, otherwise just
       // sends the prompt and returns the answer text. Resume isn't
       // supported here yet (would need session forking).
       const args = ['run', '--format', 'json', '--model', `${provider}/${opts?.model ?? model}`];
-      if (opts?.systemPrompt) {
-        // opencode CLI doesn't take a --system flag in `run`; the system
-        // prompt is bundled into the user message instead.
-        return spawnWithStdin('opencode', args, `${opts.systemPrompt}\n\n${prompt}`, {
-          timeout, cwd: opts?.cwd,
-        }).then((stdout) => parseOpencodeTranscript(stdout).answer);
-      }
-      return spawnWithStdin('opencode', args, prompt, {
+      // opencode CLI doesn't take a --system flag in `run`; the system
+      // prompt is bundled into the user message instead.
+      const stdinText = opts?.systemPrompt ? `${opts.systemPrompt}\n\n${prompt}` : prompt;
+      const stdout = await spawnWithStdin('opencode', args, stdinText, {
         timeout, cwd: opts?.cwd,
-      }).then((stdout) => parseOpencodeTranscript(stdout).answer);
+      });
+      const parser = createStreamingOpencodeParser();
+      for (const line of stdout.split('\n')) if (line) parser.feed(line);
+      return parser.finalize().answer;
     },
   };
 }

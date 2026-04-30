@@ -1,6 +1,6 @@
 {
   "name": "e2eval",
-  "version": "0.2.3",
+  "version": "0.2.4",
   "description": "Middleware-powered eval framework for Claude Code. Intercepts the Anthropic API to observe and scrub tool calls.",
   "type": "module",
   "main": "./dist/index.js",

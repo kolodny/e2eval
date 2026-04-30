@@ -1,18 +1,18 @@
 /**
  * Claude Code adapter — proxy edition.
  *
- * Spawns claude with stream-json output, captures stdout, parses it
- * inline, and returns the `NormalizedTranscript`. No transcript or
- * stderr file is written by the framework — claude maintains its own
- * session logs under `~/.claude/projects/` for users who want to audit.
+ * Spawns claude with stream-json output and a streaming line parser
+ * that holds only `{answer, sessionId}` regardless of run length —
+ * a 30-minute eval with a long transcript stays at O(longest single
+ * line) rather than buffering the entire stream-json in memory. No
+ * transcript or stderr file is written by the framework — claude
+ * maintains its own session logs under `~/.claude/projects/` for
+ * users who want to audit.
  */
-import { $ } from 'zx';
 import type { AgentAdapter } from '../../core/types.js';
-import { spawnWithStdin } from '../../core/process.js';
-import { parseClaudeTranscript } from './parse-transcript.js';
+import { spawnStreaming, spawnWithStdin } from '../../core/process.js';
+import { createStreamingClaudeParser } from './parse-transcript.js';
 import { startClaudeProxy } from './proxy.js';
-
-$.verbose = false;
 
 /**
  * Inline `--settings` to override only `ANTHROPIC_BASE_URL` — the rest of
@@ -43,26 +43,29 @@ const adapter: AgentAdapter = {
 
   async run(opts) {
     const settings = buildSettings(opts.proxyUrl);
-    // Prompt goes through stdin (argv caps at 128KB). stderr is captured
-    // (pipe) and forwarded to our stderr — NOT inherited. If claude is
-    // ever orphaned (test cancellation, killed parent), an inherited fd
-    // would keep our outer-process stderr pipe alive, blocking node:test
-    // from exiting. With pipe+forward, the orphan dies on its next write
-    // (SIGPIPE) or just sits there harmlessly.
-    const proc = $({
+    const parser = createStreamingClaudeParser();
+    // stderr is piped (not inherited) — see `process.ts`. An inherited
+    // fd on an orphaned child blocks node:test from exiting after the
+    // outer test cancels.
+    await spawnStreaming({
+      cmd: 'claude',
+      args: [
+        '--settings', settings,
+        '--permission-mode=bypassPermissions',
+        '--output-format=stream-json',
+        '--verbose',
+        '-p',
+      ],
       cwd: opts.runDir,
       env: opts.env,
-      timeout: '30m',
-      nothrow: true,
-      stdio: ['pipe', 'pipe', 'pipe'],
-      input: opts.prompt,
-      ...(opts.signal ? { signal: opts.signal } : {}),
-    })`claude --settings ${settings} --permission-mode=bypassPermissions --output-format=stream-json --verbose -p`;
-    if (opts.onStdout) proc.stdout?.on('data', (c: Buffer) => opts.onStdout!(c));
-    if (opts.onStderr) proc.stderr?.on('data', (c: Buffer) => opts.onStderr!(c));
-    else proc.stderr?.pipe(process.stderr, { end: false });
-    const result = await proc;
-    return parseClaudeTranscript(result.stdout ?? '');
+      stdin: opts.prompt,
+      timeoutMs: 30 * 60_000,
+      signal: opts.signal,
+      onStdoutChunk: opts.onStdout,
+      onStderrChunk: opts.onStderr,
+      onStdoutLine: (line) => parser.feed(line),
+    });
+    return parser.finalize();
   },
 
   callLLM(prompt, opts) {

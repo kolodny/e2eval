@@ -4,19 +4,18 @@
  * Spawns `codex exec --json` with a runtime `-c` config flag overriding
  * the configured model provider's `base_url` to point at our Responses
  * proxy. Codex always uses `wire_api = "responses"` for its OpenAI-style
- * providers; the proxy speaks that wire format.
+ * providers; the proxy speaks that wire format. Output is line-streamed
+ * through a parser that holds only `{answer, sessionId}` so memory is
+ * bounded regardless of run length.
  *
  * Defaults assume the user's `~/.codex/config.toml` has a provider
  * named `openai-chat-completions` (the codex default). Override via
  * the adapter constructor for custom provider names.
  */
-import { $ } from 'zx';
-import type { AgentAdapter } from '../../core/types.js';
-import { spawnWithStdin } from '../../core/process.js';
-import { parseCodexTranscript } from './parse-transcript.js';
+import type { AgentAdapter, AgentRunOpts } from '../../core/types.js';
+import { spawnStreaming, spawnWithStdin } from '../../core/process.js';
+import { createStreamingCodexParser } from './parse-transcript.js';
 import { startCodexProxy } from './proxy.js';
-
-$.verbose = false;
 
 export type CodexAdapterOptions = {
   /** Provider name in `~/.codex/config.toml [model_providers.X]` to override. Default `openai-chat-completions`. */
@@ -27,6 +26,43 @@ export type CodexAdapterOptions = {
 
 const DEFAULT_PROVIDER = 'openai-chat-completions';
 
+function buildCodexArgs(provider: string, proxyUrl: string, model: string | undefined): string[] {
+  const args = [
+    'exec',
+    '--skip-git-repo-check',
+    '--dangerously-bypass-approvals-and-sandbox',
+    '--json',
+    // The provider's base_url is the override point. Codex appends
+    // `/responses` to it, so we hand `<proxyUrl>/v1` to land on
+    // `/v1/responses`. The TOML override value is parsed as TOML, so
+    // we wrap in quotes.
+    '-c', `model_providers.${provider}.base_url="${proxyUrl}/v1"`,
+  ];
+  if (model) args.push('-m', model);
+  return args;
+}
+
+async function runCodex(
+  provider: string,
+  model: string | undefined,
+  opts: AgentRunOpts,
+) {
+  const parser = createStreamingCodexParser();
+  await spawnStreaming({
+    cmd: 'codex',
+    args: buildCodexArgs(provider, opts.proxyUrl, model),
+    cwd: opts.runDir,
+    env: opts.env,
+    stdin: opts.prompt,
+    timeoutMs: 30 * 60_000,
+    signal: opts.signal,
+    onStdoutChunk: opts.onStdout,
+    onStderrChunk: opts.onStderr,
+    onStdoutLine: (line) => parser.feed(line),
+  });
+  return parser.finalize();
+}
+
 const codexAdapter: AgentAdapter = {
   name: 'codex',
 
@@ -34,74 +70,30 @@ const codexAdapter: AgentAdapter = {
     return startCodexProxy(opts);
   },
 
-  async run(opts) {
-    const provider = DEFAULT_PROVIDER;
-    // Override the provider's base_url to point at our proxy. Codex
-    // appends `/responses` to the configured base_url, so we hand it
-    // `<proxyUrl>/v1` to land on `/v1/responses`. The TOML override
-    // value is parsed as TOML, so we wrap in quotes.
-    const overrides = [
-      `model_providers.${provider}.base_url="${opts.proxyUrl}/v1"`,
-    ];
-
-    const args = [
-      'exec',
-      '--skip-git-repo-check',
-      '--dangerously-bypass-approvals-and-sandbox',
-      '--json',
-    ];
-    for (const o of overrides) args.push('-c', o);
-
-    // stderr piped (not inherited) — see claude/adapter.ts.
-    const proc = $({
-      cwd: opts.runDir,
-      env: opts.env,
-      timeout: '30m',
-      nothrow: true,
-      stdio: ['pipe', 'pipe', 'pipe'],
-      input: opts.prompt,
-      ...(opts.signal ? { signal: opts.signal } : {}),
-    })`codex ${args}`;
-    if (opts.onStdout) proc.stdout?.on('data', (c: Buffer) => opts.onStdout!(c));
-    if (opts.onStderr) proc.stderr?.on('data', (c: Buffer) => opts.onStderr!(c));
-    else proc.stderr?.pipe(process.stderr, { end: false });
-    const result = await proc;
-    return parseCodexTranscript(result.stdout ?? '');
+  run(opts) {
+    return runCodex(DEFAULT_PROVIDER, undefined, opts);
   },
 
-  callLLM(prompt, opts) {
+  async callLLM(prompt, opts) {
     const timeout = opts?.timeout ?? 240_000;
     const args = ['exec', '--skip-git-repo-check', '--dangerously-bypass-approvals-and-sandbox', '--json'];
     if (opts?.model) args.push('-m', opts.model);
-    return spawnWithStdin('codex', args, opts?.systemPrompt ? `${opts.systemPrompt}\n\n${prompt}` : prompt, {
+    const stdout = await spawnWithStdin('codex', args, opts?.systemPrompt ? `${opts.systemPrompt}\n\n${prompt}` : prompt, {
       timeout, cwd: opts?.cwd,
-    }).then((stdout) => parseCodexTranscript(stdout).answer);
+    });
+    const parser = createStreamingCodexParser();
+    for (const line of stdout.split('\n')) if (line) parser.feed(line);
+    return parser.finalize().answer;
   },
 };
 
 export function createCodexAdapter(opts: CodexAdapterOptions = {}): AgentAdapter {
   if (Object.keys(opts).length === 0) return codexAdapter;
-  // Per-instance variant when a non-default provider is requested.
   const provider = opts.provider ?? DEFAULT_PROVIDER;
   const model = opts.model;
   return {
     ...codexAdapter,
-    async run(runOpts) {
-      const overrides = [`model_providers.${provider}.base_url="${runOpts.proxyUrl}/v1"`];
-      const args = ['exec', '--skip-git-repo-check', '--dangerously-bypass-approvals-and-sandbox', '--json'];
-      for (const o of overrides) args.push('-c', o);
-      if (model) args.push('-m', model);
-      const proc = $({
-        cwd: runOpts.runDir, env: runOpts.env, timeout: '30m', nothrow: true,
-        stdio: ['pipe', 'pipe', 'pipe'], input: runOpts.prompt,
-        ...(runOpts.signal ? { signal: runOpts.signal } : {}),
-      })`codex ${args}`;
-      if (runOpts.onStdout) proc.stdout?.on('data', (c: Buffer) => runOpts.onStdout!(c));
-      if (runOpts.onStderr) proc.stderr?.on('data', (c: Buffer) => runOpts.onStderr!(c));
-      else proc.stderr?.pipe(process.stderr, { end: false });
-      const result = await proc;
-      return parseCodexTranscript(result.stdout ?? '');
-    },
+    run(runOpts) { return runCodex(provider, model, runOpts); },
   };
 }
 

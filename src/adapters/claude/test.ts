@@ -31,18 +31,16 @@
  * config in the eval's working directory.
  */
 import { randomUUID } from 'node:crypto';
-import { $ } from 'zx';
 import type {
   AgentAdapter, AgentProxy, AgentRunOpts, StartProxyOpts,
 } from '../../core/types.js';
+import { spawnStreaming } from '../../core/process.js';
 import { startClaudeProxy } from './proxy.js';
-import { parseClaudeTranscript } from './parse-transcript.js';
+import { createStreamingClaudeParser } from './parse-transcript.js';
 import { startFakeUpstream } from '../../core/test/fake-upstream.js';
 import type {
   AgentScript, ScriptedResponse, ScriptedRequest,
 } from '../../providers/anthropic-script-types.js';
-
-$.verbose = false;
 
 // Re-export the shared Anthropic-wire script types so existing imports
 // (e.g. `import type { ScriptedBlock } from 'e2eval'`) keep working.
@@ -130,21 +128,29 @@ export function createClaudeTestAdapter(script: AgentScript): AgentAdapter {
 
     async run(opts: AgentRunOpts) {
       const settings = buildSettings(opts.proxyUrl);
+      const parser = createStreamingClaudeParser();
       // stderr piped (not inherited) so an orphan claude can't keep our
       // outer test runner's stderr pipe alive after node:test cancels a
       // test — that's the hang npm test was hitting.
-      const proc = $({
+      await spawnStreaming({
+        cmd: 'claude',
+        args: [
+          '--settings', settings,
+          '--permission-mode=bypassPermissions',
+          '--output-format=stream-json',
+          '--verbose',
+          '-p',
+        ],
         cwd: opts.runDir,
         env: opts.env,
-        timeout: '10m',
-        nothrow: true,
-        stdio: ['pipe', 'pipe', 'pipe'],
-        input: opts.prompt,
-        ...(opts.signal ? { signal: opts.signal } : {}),
-      })`claude --settings ${settings} --permission-mode=bypassPermissions --output-format=stream-json --verbose -p`;
-      proc.stderr?.pipe(process.stderr, { end: false });
-      const result = await proc;
-      return parseClaudeTranscript(result.stdout ?? '');
+        stdin: opts.prompt,
+        timeoutMs: 10 * 60_000,
+        signal: opts.signal,
+        onStdoutChunk: opts.onStdout,
+        onStderrChunk: opts.onStderr,
+        onStdoutLine: (line) => parser.feed(line),
+      });
+      return parser.finalize();
     },
 
     callLLM: async () => '',
